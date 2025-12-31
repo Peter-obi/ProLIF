@@ -160,12 +160,17 @@ def _compute_single(
         }
 
     if 'CationPi' in types:
-        from .cationpi import cationpi_contacts
-        ring_indices = [jnp.arange(min(6, res_coords.shape[0]))]
-        contact_mask, dists, angles = cationpi_contacts(
+        from .cationpi import cationpi_contacts_masked
+        S = 6
+        idx = jnp.arange(S)
+        ring_mask = idx < res_coords.shape[0]
+        idx_padded = jnp.broadcast_to(idx, (1, S))
+        ring_mask = jnp.broadcast_to(ring_mask, (1, S))
+        contact_mask, dists, angles = cationpi_contacts_masked(
             ligand_coords,
             res_coords,
-            ring_indices,
+            idx_padded,
+            ring_mask,
         )
         results['CationPi'] = {
             'mask': contact_mask,
@@ -174,11 +179,16 @@ def _compute_single(
         }
 
     if 'PiCation' in types:
-        from .cationpi import pication_contacts
-        ring_indices = [jnp.arange(min(6, ligand_coords.shape[0]))]
-        contact_mask, dists, angles = pication_contacts(
+        from .cationpi import pication_contacts_masked
+        S = 6
+        idx = jnp.arange(S)
+        ring_mask = idx < ligand_coords.shape[0]
+        idx_padded = jnp.broadcast_to(idx, (1, S))
+        ring_mask = jnp.broadcast_to(ring_mask, (1, S))
+        contact_mask, dists, angles = pication_contacts_masked(
             ligand_coords,
-            ring_indices,
+            idx_padded,
+            ring_mask,
             res_coords,
         )
         results['PiCation'] = {
@@ -188,14 +198,22 @@ def _compute_single(
         }
 
     if 'FaceToFace' in types:
-        from .pistacking import facetoface_contacts
-        lig_ring_indices = [jnp.arange(min(6, ligand_coords.shape[0]))]
-        res_ring_indices = [jnp.arange(min(6, res_coords.shape[0]))]
-        contact_mask, dists, plane_angles, ncc_angles = facetoface_contacts(
+        from .pistacking import facetoface_contacts_masked
+        S = 6
+        idx = jnp.arange(S)
+        lig_mask = idx < ligand_coords.shape[0]
+        res_mask = idx < res_coords.shape[0]
+        lig_idx = jnp.broadcast_to(idx, (1, S))
+        res_idx = jnp.broadcast_to(idx, (1, S))
+        lig_mask = jnp.broadcast_to(lig_mask, (1, S))
+        res_mask = jnp.broadcast_to(res_mask, (1, S))
+        contact_mask, dists, plane_angles, ncc_angles = facetoface_contacts_masked(
             ligand_coords,
-            lig_ring_indices,
+            lig_idx,
+            lig_mask,
             res_coords,
-            res_ring_indices,
+            res_idx,
+            res_mask,
         )
         results['FaceToFace'] = {
             'mask': contact_mask,
@@ -205,14 +223,22 @@ def _compute_single(
         }
 
     if 'EdgeToFace' in types:
-        from .pistacking import edgetoface_contacts
-        lig_ring_indices = [jnp.arange(min(6, ligand_coords.shape[0]))]
-        res_ring_indices = [jnp.arange(min(6, res_coords.shape[0]))]
-        contact_mask, dists, plane_angles, ncc_angles = edgetoface_contacts(
+        from .pistacking import edgetoface_contacts_masked
+        S = 6
+        idx = jnp.arange(S)
+        lig_mask = idx < ligand_coords.shape[0]
+        res_mask = idx < res_coords.shape[0]
+        lig_idx = jnp.broadcast_to(idx, (1, S))
+        res_idx = jnp.broadcast_to(idx, (1, S))
+        lig_mask = jnp.broadcast_to(lig_mask, (1, S))
+        res_mask = jnp.broadcast_to(res_mask, (1, S))
+        contact_mask, dists, plane_angles, ncc_angles = edgetoface_contacts_masked(
             ligand_coords,
-            lig_ring_indices,
+            lig_idx,
+            lig_mask,
             res_coords,
-            res_ring_indices,
+            res_idx,
+            res_mask,
         )
         results['EdgeToFace'] = {
             'mask': contact_mask,
@@ -222,14 +248,22 @@ def _compute_single(
         }
 
     if 'PiStacking' in types:
-        from .pistacking import pistacking_contacts
-        lig_ring_indices = [jnp.arange(min(6, ligand_coords.shape[0]))]
-        res_ring_indices = [jnp.arange(min(6, res_coords.shape[0]))]
-        contact_mask, dists, plane_angles, ncc_angles, stacking_type = pistacking_contacts(
+        from .pistacking import pistacking_contacts_masked
+        S = 6
+        idx = jnp.arange(S)
+        lig_mask = idx < ligand_coords.shape[0]
+        res_mask = idx < res_coords.shape[0]
+        lig_idx = jnp.broadcast_to(idx, (1, S))
+        res_idx = jnp.broadcast_to(idx, (1, S))
+        lig_mask = jnp.broadcast_to(lig_mask, (1, S))
+        res_mask = jnp.broadcast_to(res_mask, (1, S))
+        contact_mask, dists, plane_angles, ncc_angles, stacking_type = pistacking_contacts_masked(
             ligand_coords,
-            lig_ring_indices,
+            lig_idx,
+            lig_mask,
             res_coords,
-            res_ring_indices,
+            res_idx,
+            res_mask,
         )
         results['PiStacking'] = {
             'mask': contact_mask,
@@ -304,6 +338,12 @@ def _batched_distance_only(
 
 _batched_distance_only_jitted = jax.jit(
     _batched_distance_only,
+    static_argnames=('interaction_types',),
+)
+
+
+_batched_interactions_jitted = jax.jit(
+    _batched_interactions,
     static_argnames=('interaction_types',),
 )
 
@@ -403,7 +443,7 @@ def run_all_interactions(batch: dict) -> dict:
             interaction_types_tuple,
         )
     else:
-        results = _batched_interactions(
+        results = _batched_interactions_jitted(
             ligand_coords,
             residue_coords,
             valid_mask,

@@ -54,6 +54,59 @@ def batch_centroids(
     return sums / counts[:, None]
 
 
+def batch_centroids_masked(
+    coords: jnp.ndarray,
+    index_padded: jnp.ndarray,
+    mask: jnp.ndarray,
+) -> jnp.ndarray:
+    """Compute centroids for groups using padded indices and masks.
+
+    Args:
+        coords: (N, 3) array of all atom coordinates.
+        index_padded: (K, S) int array of atom indices per group.
+        mask: (K, S) bool array where True marks a valid atom in the group.
+
+    Returns:
+        (K, 3) array of centroid positions.
+    """
+    gathered = coords[index_padded]
+    weights = mask[..., None]
+    weighted = gathered * weights
+    sums = jnp.sum(weighted, axis=1)
+    counts = jnp.sum(mask, axis=1, keepdims=True)
+    return sums / counts
+
+
+def batch_ring_normals_masked(
+    coords: jnp.ndarray,
+    index_padded: jnp.ndarray,
+    mask: jnp.ndarray,
+) -> jnp.ndarray:
+    """Compute unit normals for rings using masked PCA.
+
+    Args:
+        coords: (N, 3) array of all atom coordinates.
+        index_padded: (K, S) int array of atom indices per ring.
+        mask: (K, S) bool array where True marks a valid atom in the ring.
+
+    Returns:
+        (K, 3) array of unit normal vectors.
+    """
+    gathered = coords[index_padded]
+    weights = mask[..., None]
+    sums = jnp.sum(gathered * weights, axis=1)
+    counts = jnp.sum(mask, axis=1, keepdims=True)
+    centroids = sums / counts
+    centered = gathered - centroids[:, None, :]
+    weighted = centered * weights
+    xx = jnp.einsum('kni,knj->kij', weighted, centered) / counts[..., None]
+    evals, evecs = jnp.linalg.eigh(xx)
+    normals = evecs[..., 0]
+    norms = jnp.linalg.norm(normals, axis=1, keepdims=True)
+    normals = normals / norms
+    return normals
+
+
 def ring_normal(coords: jnp.ndarray, ring_indices: jnp.ndarray) -> jnp.ndarray:
     """Compute unit normal vector to a ring plane.
 

@@ -10,7 +10,9 @@ import jax.numpy as jnp
 from .primitives import (
     angle_between_vectors,
     batch_centroids,
+    batch_centroids_masked,
     batch_ring_normals,
+    batch_ring_normals_masked,
     pairwise_distances,
 )
 
@@ -55,6 +57,28 @@ def cationpi_contacts(
     return contact_mask, distances, angles_corrected
 
 
+def cationpi_contacts_masked(
+    cation_coords: jnp.ndarray,
+    ring_coords: jnp.ndarray,
+    ring_index_padded: jnp.ndarray,
+    ring_mask: jnp.ndarray,
+    distance_cutoff: float = 4.5,
+    angle_max: float = 30.0,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Detect CationPi interactions using padded indices and masks."""
+    centroids = batch_centroids_masked(ring_coords, ring_index_padded, ring_mask)
+    normals = batch_ring_normals_masked(ring_coords, ring_index_padded, ring_mask)
+    distances = pairwise_distances(cation_coords, centroids)
+    cation_vectors = cation_coords[:, None, :] - centroids[None, :, :]
+    angles_rad = angle_between_vectors(normals[None, :, :], cation_vectors)
+    angles_deg = jnp.degrees(angles_rad)
+    angles_corrected = jnp.minimum(angles_deg, 180.0 - angles_deg)
+    distance_ok = distances <= distance_cutoff
+    angle_ok = angles_corrected <= angle_max
+    contact_mask = distance_ok & angle_ok
+    return contact_mask, distances, angles_corrected
+
+
 def pication_contacts(
     ring_coords: jnp.ndarray,
     ring_indices: list,
@@ -89,4 +113,26 @@ def pication_contacts(
     angle_ok = angles_corrected <= angle_max
     contact_mask = distance_ok & angle_ok
 
+    return contact_mask, distances, angles_corrected
+
+
+def pication_contacts_masked(
+    ring_coords: jnp.ndarray,
+    ring_index_padded: jnp.ndarray,
+    ring_mask: jnp.ndarray,
+    cation_coords: jnp.ndarray,
+    distance_cutoff: float = 4.5,
+    angle_max: float = 30.0,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Detect PiCation interactions using padded indices and masks."""
+    centroids = batch_centroids_masked(ring_coords, ring_index_padded, ring_mask)
+    normals = batch_ring_normals_masked(ring_coords, ring_index_padded, ring_mask)
+    distances = pairwise_distances(centroids, cation_coords)
+    cation_vectors = cation_coords[None, :, :] - centroids[:, None, :]
+    angles_rad = angle_between_vectors(normals[:, None, :], cation_vectors)
+    angles_deg = jnp.degrees(angles_rad)
+    angles_corrected = jnp.minimum(angles_deg, 180.0 - angles_deg)
+    distance_ok = distances <= distance_cutoff
+    angle_ok = angles_corrected <= angle_max
+    contact_mask = distance_ok & angle_ok
     return contact_mask, distances, angles_corrected
