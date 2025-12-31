@@ -373,18 +373,42 @@ def build_ring_cation_indices(lig_mol, residues):
     }
 
 
-def jax_benchmark(
-    lig_f,
-    res_f,
-    res_valid_mask,
-    lig_masks,
-    res_actor_masks,
-    angle_idx,
-    ring_idx,
-    vdw_radii,
-    runs: int,
-    use_gpu: bool = False,
-) -> BenchmarkResult:
+
+def _complete_angle_indices(angle_idx: dict, residues: list) -> dict:
+    """Ensure angle index mapping contains donor variants expected by JAX helpers.
+
+    Some environments may provide an older build of the angle index helpers that
+    only include acceptor-side mappings (e.g., 'hb', 'xbacc'). This function
+    fills in missing donor-side mappings ('hb_donor', 'xbdon') with empty
+    arrays/lists so downstream code can run without KeyError and simply find no
+    donor-side matches.
+    """
+    import jax.numpy as jnp
+
+    R = len(residues)
+    if 'hb_donor' not in angle_idx:
+        angle_idx['hb_donor'] = {
+            'lig_d_idx': jnp.zeros((0,), dtype=int),
+            'lig_h_idx': jnp.zeros((0,), dtype=int),
+            'res_a_idx': [jnp.zeros((0,), dtype=int) for _ in range(R)],
+        }
+    if 'xbacc' not in angle_idx:
+        angle_idx['xbacc'] = {
+            'lig_a_idx': jnp.zeros((0,), dtype=int),
+            'lig_r_idx': jnp.zeros((0,), dtype=int),
+            'res_x_idx': [jnp.zeros((0,), dtype=int) for _ in range(R)],
+            'res_d_idx': [jnp.zeros((0,), dtype=int) for _ in range(R)],
+        }
+    if 'xbdon' not in angle_idx:
+        angle_idx['xbdon'] = {
+            'lig_x_idx': jnp.zeros((0,), dtype=int),
+            'lig_d_idx': jnp.zeros((0,), dtype=int),
+            'res_a_idx': [jnp.zeros((0,), dtype=int) for _ in range(R)],
+            'res_r_idx': [jnp.zeros((0,), dtype=int) for _ in range(R)],
+        }
+    return angle_idx
+
+def jax_benchmark(lig_f, res_f, res_valid_mask, lig_masks, res_actor_masks, angle_idx, ring_idx, vdw_radii, runs: int, use_gpu: bool = False) -> BenchmarkResult:
     """Benchmark JAX frame-batched geometry for nine interactions.
 
     Places arrays on GPU when requested and times the end-to-end evaluation,
@@ -392,14 +416,12 @@ def jax_benchmark(
     """
     import jax
     import jax.numpy as jnp
-    from prolif.interactions._jax.framebatch import pairwise_distances_frames
 
+    # Optional: place small, structure-only arrays on device
     if use_gpu:
-        gpus = jax.devices("gpu")
+        gpus = jax.devices('gpu')
         if gpus:
             dev = gpus[0]
-            lig_f = jax.device_put(lig_f, device=dev)
-            res_f = jax.device_put(res_f, device=dev)
             res_valid_mask = jax.device_put(res_valid_mask, device=dev)
             lig_masks = jax.tree_util.tree_map(lambda x: jax.device_put(x, device=dev), lig_masks)
             res_actor_masks = jax.tree_util.tree_map(lambda x: jax.device_put(x, device=dev), res_actor_masks)
@@ -424,18 +446,55 @@ def jax_benchmark(
                 'pi': ring_idx['pi'],
                 'cp': ring_idx['cp'],
             }
+            lr, rr, vdw_tol = vdw_radii
+            vdw_radii = (
+                jax.device_put(lr, device=dev),
+                jax.device_put(rr, device=dev),
+                vdw_tol,
+            )
+        else:
+            use_gpu = False
+
+    # Timing loop
+    times = []
+    mem_peak = None
+    mem_total = None
     for _ in range(runs):
         t0 = time.perf_counter()
-        results = jax_has_interactions_frames(
-            lig_f, res_f, res_valid_mask, lig_masks, res_actor_masks, angle_idx, ring_idx, vdw_radii
-        )
-        any_last = next(iter(results.values()))
-        _ = any_last.block_until_ready()
+        if use_gpu:
+            F = int(lig_f.shape[0])
+            step = 2048
+            for i in range(0, F, step):
+                j = min(i + step, F)
+                chunk_l = jax.device_put(lig_f[i:j], device=dev)
+                chunk_r = jax.device_put(res_f[i:j], device=dev)
+                res = jax_has_interactions_frames(
+                    chunk_l, chunk_r, res_valid_mask, lig_masks, res_actor_masks, angle_idx, ring_idx, vdw_radii
+                )
+                last = next(iter(res.values()))
+                _ = last.block_until_ready()
+                try:
+                    import pynvml
+                    pynvml.nvmlInit()
+                    h = pynvml.nvmlDeviceGetHandleByIndex(0)
+                    m = pynvml.nvmlDeviceGetMemoryInfo(h)
+                    used = m.used / (1024 * 1024)
+                    total = m.total / (1024 * 1024)
+                    mem_peak = max(mem_peak or 0.0, used)
+                    mem_total = total
+                except Exception:
+                    pass
+        else:
+            res = jax_has_interactions_frames(
+                lig_f, res_f, res_valid_mask, lig_masks, res_actor_masks, angle_idx, ring_idx, vdw_radii
+            )
+            last = next(iter(res.values()))
+            _ = last.block_until_ready()
         times.append((time.perf_counter() - t0) * 1000.0)
 
     arr = np.array(times)
     return BenchmarkResult(
-        name="JAX frame-batched (9 interactions)",
+        name='JAX frame-batched (9 interactions)',
         frames=int(lig_f.shape[0]),
         runs=runs,
         mean_ms=float(arr.mean()),
@@ -461,36 +520,12 @@ def prolif_benchmark(lig_mol, residues, frames: int, runs: int) -> BenchmarkResu
     ]
 
     times = []
-    mem_peak, mem_total = None, None
     for _ in range(runs):
         t0 = time.perf_counter()
-        if use_gpu:
-            F = int(lig_f.shape[0])
-            step = 2048
-            for i in range(0, F, step):
-                j = min(i + step, F)
-                chunk_l = jax.device_put(lig_f[i:j], device=dev)
-                chunk_r = jax.device_put(res_f[i:j], device=dev)
-                res = jax_has_interactions_frames(
-                    chunk_l, chunk_r, res_valid_mask, lig_masks, res_actor_masks, angle_idx, ring_idx, vdw_radii
-                )
-                last = next(iter(res.values()))
-                _ = last.block_until_ready()
-                try:
-                    import pynvml
-                    pynvml.nvmlInit()
-                    h = pynvml.nvmlDeviceGetHandleByIndex(0)
-                    m = pynvml.nvmlDeviceGetMemoryInfo(h)
-                    u = m.used / (1024 * 1024); t = m.total / (1024 * 1024)
-                    mem_peak = max(mem_peak or 0.0, u); mem_total = t
-                except Exception:
-                    pass
-        else:
-            res = jax_has_interactions_frames(
-                lig_f, res_f, res_valid_mask, lig_masks, res_actor_masks, angle_idx, ring_idx, vdw_radii
-            )
-            last = next(iter(res.values()))
-            _ = last.block_until_ready()
+        for _f in range(frames):
+            for res in residues:
+                for inter in inters:
+                    _ = inter.any(lig_mol, res)
         times.append((time.perf_counter() - t0) * 1000.0)
 
     arr = np.array(times)
@@ -502,8 +537,6 @@ def prolif_benchmark(lig_mol, residues, frames: int, runs: int) -> BenchmarkResu
         std_ms=float(arr.std()),
         min_ms=float(arr.min()),
         max_ms=float(arr.max()),
-        mem_peak_mb=float(mem_peak) if mem_peak is not None else None,
-        mem_total_mb=float(mem_total) if mem_total is not None else None,
     )
 
 
@@ -698,7 +731,7 @@ def jax_boolean_results(
     return results
 
 
-def prolif_boolean_results(u, lig_ag, residue_ags):
+def prolif_boolean_results(u, lig_ag, residue_ags, max_frames: int | None = None):
     """Compute per-interaction boolean results using ProLIF per frame.
 
     Rebuilds ProLIF Molecule objects for ligand and residues at each frame and
@@ -721,7 +754,8 @@ def prolif_boolean_results(u, lig_ag, residue_ags):
         'HBAcceptor', 'HBDonor', 'PiStacking', 'CationPi', 'PiCation',
     ]
 
-    F = len(u.trajectory)
+    F_total = len(u.trajectory)
+    F = F_total if not max_frames or max_frames <= 0 else min(F_total, int(max_frames))
     R = len(residue_ags)
     out = {n: np.zeros((F, R), dtype=bool) for n in names}
 
@@ -758,6 +792,7 @@ def summarize_accuracy(jax_out, pl_out):
 def main():
     parser = argparse.ArgumentParser(description="Frame-batched JAX vs ProLIF benchmark (9 interactions)")
     parser.add_argument('--runs', type=int, default=3, help='Number of timed runs')
+    parser.add_argument('--max-frames', type=int, default=None, help='Cap frames processed from the trajectory')
     parser.add_argument('--gpu', action='store_true', help='Run JAX path on GPU (device_put + sync timing)')
     parser.add_argument('--top', type=str, default=None, help='Topology file path (e.g., PDB/PRMTOP/GRO)')
     parser.add_argument('--traj', type=str, nargs='*', default=None, help='Trajectory file(s) (e.g., XTC/DCD)')
@@ -770,11 +805,12 @@ def main():
         args.top, args.traj, args.ligsel, args.protsel, args.cutoff
     )
 
-    lig_f, res_f, res_valid_mask = build_trajectory_frames(u, lig_ag, residue_ags, max_frames=None)
+    lig_f, res_f, res_valid_mask = build_trajectory_frames(u, lig_ag, residue_ags, max_frames=args.max_frames)
     F = int(lig_f.shape[0])
     lig_masks, res_actor_masks = jax_build_actor_masks(lig_mol, residues)
 
     angle_idx = jax_build_angle_indices(lig_mol, residues)
+    angle_idx = _complete_angle_indices(angle_idx, residues)
     ring_idx = jax_build_ring_cation_indices(lig_mol, residues)
     vdw_radii = jax_build_vdw_radii(lig_mol, residues, lig_ag=lig_ag, residue_ags=residue_ags, use_real=True)
     jax_res = jax_benchmark(
@@ -783,7 +819,7 @@ def main():
     prolif_res = prolif_benchmark(lig_mol, residues, F, args.runs)
 
     jax_out = jax_has_interactions_frames(lig_f, res_f, res_valid_mask, lig_masks, res_actor_masks, angle_idx, ring_idx, vdw_radii)
-    pl_out = prolif_boolean_results(u, lig_ag, residue_ags)
+    pl_out = prolif_boolean_results(u, lig_ag, residue_ags, max_frames=F)
     acc = summarize_accuracy(jax_out, pl_out)
 
     print("\nFrame-batched benchmark (9 interactions; all frame-batched in JAX path):")
