@@ -22,7 +22,6 @@ from typing import List, Tuple
 
 import numpy as np
 
-# Use JAX helpers directly for analysis primitives
 from prolif.interactions._jax import (
     has_interactions_frames as jax_has_interactions_frames,
     build_actor_masks as jax_build_actor_masks,
@@ -41,13 +40,18 @@ class BenchmarkResult:
     std_ms: float
     min_ms: float
     max_ms: float
+    mem_peak_mb: float | None = None
+    mem_total_mb: float | None = None
 
     def __str__(self) -> str:
-        return (
+        base = (
             f"{self.name:28s} | "
             f"{self.mean_ms:8.3f} ± {self.std_ms:6.3f} ms | "
             f"min: {self.min_ms:7.3f} | max: {self.max_ms:7.3f}"
         )
+        if self.mem_peak_mb is not None and self.mem_total_mb is not None:
+            base += f" | GPU mem: {self.mem_peak_mb:.0f}/{self.mem_total_mb:.0f} MiB"
+        return base
 
 
 def load_system_and_residues(top: str | None = None, traj: list[str] | None = None,
@@ -438,6 +442,8 @@ def jax_benchmark(
         std_ms=float(arr.std()),
         min_ms=float(arr.min()),
         max_ms=float(arr.max()),
+        mem_peak_mb=float(mem_peak) if mem_peak is not None else None,
+        mem_total_mb=float(mem_total) if mem_total is not None else None,
     )
 
 
@@ -455,12 +461,36 @@ def prolif_benchmark(lig_mol, residues, frames: int, runs: int) -> BenchmarkResu
     ]
 
     times = []
+    mem_peak, mem_total = None, None
     for _ in range(runs):
         t0 = time.perf_counter()
-        for _f in range(frames):
-            for res in residues:
-                for inter in inters:
-                    _ = inter.any(lig_mol, res)
+        if use_gpu:
+            F = int(lig_f.shape[0])
+            step = 2048
+            for i in range(0, F, step):
+                j = min(i + step, F)
+                chunk_l = jax.device_put(lig_f[i:j], device=dev)
+                chunk_r = jax.device_put(res_f[i:j], device=dev)
+                res = jax_has_interactions_frames(
+                    chunk_l, chunk_r, res_valid_mask, lig_masks, res_actor_masks, angle_idx, ring_idx, vdw_radii
+                )
+                last = next(iter(res.values()))
+                _ = last.block_until_ready()
+                try:
+                    import pynvml
+                    pynvml.nvmlInit()
+                    h = pynvml.nvmlDeviceGetHandleByIndex(0)
+                    m = pynvml.nvmlDeviceGetMemoryInfo(h)
+                    u = m.used / (1024 * 1024); t = m.total / (1024 * 1024)
+                    mem_peak = max(mem_peak or 0.0, u); mem_total = t
+                except Exception:
+                    pass
+        else:
+            res = jax_has_interactions_frames(
+                lig_f, res_f, res_valid_mask, lig_masks, res_actor_masks, angle_idx, ring_idx, vdw_radii
+            )
+            last = next(iter(res.values()))
+            _ = last.block_until_ready()
         times.append((time.perf_counter() - t0) * 1000.0)
 
     arr = np.array(times)
@@ -472,6 +502,8 @@ def prolif_benchmark(lig_mol, residues, frames: int, runs: int) -> BenchmarkResu
         std_ms=float(arr.std()),
         min_ms=float(arr.min()),
         max_ms=float(arr.max()),
+        mem_peak_mb=float(mem_peak) if mem_peak is not None else None,
+        mem_total_mb=float(mem_total) if mem_total is not None else None,
     )
 
 
