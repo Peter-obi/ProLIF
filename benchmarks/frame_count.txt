@@ -1,0 +1,1 @@
+benchmarks/MDR00020797/full.pdb | benchmarks/MDR00020797/full.xtc -> Frames: 50001
