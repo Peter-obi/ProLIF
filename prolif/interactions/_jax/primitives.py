@@ -112,9 +112,7 @@ def batch_ring_normals_masked(
 
 
 def ring_normal(coords: jnp.ndarray, ring_indices: jnp.ndarray) -> jnp.ndarray:
-    """Compute unit normal vector to a ring plane.
-
-    Uses the ring centroid and first two atoms to define the plane.
+    """Compute unit normal vector to a ring plane using Newell's method.
 
     Args:
         coords: (N, 3) array of all atom coordinates.
@@ -123,38 +121,24 @@ def ring_normal(coords: jnp.ndarray, ring_indices: jnp.ndarray) -> jnp.ndarray:
     Returns:
         (3,) unit normal vector perpendicular to the ring plane.
     """
-    ring_coords = coords[ring_indices]
-    centroid = ring_coords.mean(axis=0)
-    ca = ring_coords[0] - centroid
-    cb = ring_coords[1] - centroid
-    normal = jnp.cross(ca, cb)
-    return normal / jnp.linalg.norm(normal)
+    pts = coords[ring_indices]
+    pts_next = jnp.roll(pts, shift=-1, axis=0)
+    x1, y1, z1 = pts[..., 0], pts[..., 1], pts[..., 2]
+    x2, y2, z2 = pts_next[..., 0], pts_next[..., 1], pts_next[..., 2]
+    nx = jnp.sum((y1 - y2) * (z1 + z2))
+    ny = jnp.sum((z1 - z2) * (x1 + x2))
+    nz = jnp.sum((x1 - x2) * (y1 + y2))
+    normal = jnp.array([nx, ny, nz])
+    norm = jnp.linalg.norm(normal)
+    return jnp.where(norm > 0, normal / norm, jnp.array([0.0, 0.0, 1.0]))
 
 
 def batch_ring_normals(
     coords: jnp.ndarray, ring_indices_list: list[jnp.ndarray]
 ) -> jnp.ndarray:
-    """Compute unit normal vectors for multiple rings.
-
-    Vectorized version of ring_normal for efficient batch processing.
-
-    Args:
-        coords: (N, 3) array of all atom coordinates.
-        ring_indices_list: List of K arrays, each containing ring atom indices.
-
-    Returns:
-        (K, 3) array of unit normal vectors.
-    """
-    centroids = batch_centroids(coords, ring_indices_list)
-
-    first_atoms = jnp.array([coords[r[0]] for r in ring_indices_list])
-    second_atoms = jnp.array([coords[r[1]] for r in ring_indices_list])
-
-    ca = first_atoms - centroids
-    cb = second_atoms - centroids
-    normals = jnp.cross(ca, cb)
-
-    return normals / jnp.linalg.norm(normals, axis=1, keepdims=True)
+    """Compute unit normal vectors for multiple rings using Newell's method."""
+    normals = [ring_normal(coords, idxs) for idxs in ring_indices_list]
+    return jnp.stack(normals, axis=0)
 
 
 def angle_between_vectors(v1: jnp.ndarray, v2: jnp.ndarray) -> jnp.ndarray:

@@ -1,39 +1,34 @@
 # ProLIF JAX Acceleration Project
 
-## Status: ✅ COMPLETE
+## Status: Direction Change — Simplify JAX Path
 
-All 67 tests passing. Core implementation finished.
+All tests currently pass, but we’re simplifying the JAX layer to remove low‑ROI residue‑batched complexity. The new focus is:
+- Keep simple, correct integration that uses JAX for distances only.
+- Remove residue‑batched dispatch + index threading.
+- Target future MD use via frame‑batching (fixed indices; vmap over frames).
 
 ## Goal
 Accelerate interaction fingerprint calculations using JAX for vectorized geometric operations with optional GPU support.
 
-## Architecture
+## Architecture (after simplification)
 
 ```
 prolif/interactions/_jax/
 ├── __init__.py          # JAX availability check, public API
-├── primitives.py        # Stage 1: Geometric primitives ✅
-├── vdw.py              # Stage 2: VdW contacts ✅
-├── hydrophobic.py      # Stage 2: Hydrophobic contacts ✅
-├── ionic.py            # Stage 2: Ionic contacts ✅
-├── hbond.py            # Stage 2: Hydrogen bonds ✅
-├── xbond.py            # Stage 2: Halogen bonds ✅
-├── cation_pi.py        # Stage 2: Cation-pi interactions ✅
-├── pi_stacking.py      # Stage 2: Pi-stacking interactions ✅
-├── dispatch.py         # Stage 3: Batch processing with vmap ✅
-├── accelerator.py      # Stage 4: Integration layer ✅
-└── *_guide.py          # Educational versions (gitignored)
+├── primitives.py        # Geometric primitives (keep)
+├── integration.py       # Simple path using JAX for distances (keep)
+├── accelerator.py       # Thin wrapper, routes to simple path (slim)
+└── (remove gradually)
+    ├── dispatch.py      # Residue-batched vmap + padding (remove)
+    └── per-interaction angle kernels used only by dispatch (review/trim)
 ```
 
-## Design Decisions
+## Design Decisions (updated)
 
-| Decision | Choice | Rationale |
-|----------|--------|-----------|
-| JAX dependency | Optional (`extras_require["jax"]`) | Don't break existing users |
-| API changes | None - use `backend="jax"` flag | Backwards compatible |
-| Fallback | Auto-detect JAX availability | Graceful degradation |
-| GPU memory | Batch by frame, not full trajectory | Memory bounded |
-| SMARTS matching | Keep in RDKit | Complex chemistry, not worth reimplementing |
+- Keep SMARTS and chemistry in RDKit; do not duplicate with “prefilter”.
+- Use JAX where it clearly helps without extra plumbing: pairwise distances.
+- Remove residue‑batched dispatch: padding + index threading added complexity for ~1x CPU.
+- Target MD: indices fixed across frames ⇒ vmap over frames; no padding/index juggling.
 
 ## CRITICAL: Match ProLIF Implementations
 
@@ -56,15 +51,13 @@ All JAX primitives and interactions MUST match ProLIF's existing logic, just opt
 - Aromaticity/ring perception
 
 ## What Moves to JAX
-- All coordinate-based geometry (after atom indices known)
-- Distance matrix calculations
-- Angle calculations (single, double)
-- Centroid/normal vector calculations
-- Threshold comparisons and filtering
+- Distance matrix calculations (pairwise distances).
+- Optionally basic vector math reused by integration.
+  - Angle checks remain in the simple integration path (Python control), unless we do frame‑batched MD later.
 
 ---
 
-## Stage 1: Geometric Primitives ✅
+## Geometric Primitives (keep)
 
 **Status**: COMPLETE (24 tests passing)
 
@@ -111,79 +104,18 @@ All JAX primitives and interactions MUST match ProLIF's existing logic, just opt
 
 ---
 
-## Stage 3: Dispatch Layer ✅
+## Removed: Residue-batched Dispatch Layer
 
-**Status**: COMPLETE (8 tests passing)
-
-**Location**: `prolif/interactions/_jax/dispatch.py`
-
-### Functions Implemented
-
-1. **`prepare_batch`**: Convert variable-size residues to padded arrays
-   - Pad all residues to `max_atoms` with zeros
-   - Create validity mask: True for real atoms, False for padding
-   - Store `original_sizes` for unbatching
-
-2. **`run_all_interactions`**: Process all residues in parallel
-   - Define `compute_single(res_coords, mask)` for one residue
-   - Use `jax.vmap(compute_single, in_axes=(0, 0))` to parallelize
-   - Apply mask to zero out padding from results
-
-3. **`unbatch_results`**: Restore original shapes
-   - Loop through residues, slice `[:, :M]` to remove padding
-
-### Key JAX Concepts
-
-```python
-# vmap transforms function for single item → function for batch
-process_all = jax.vmap(process_one, in_axes=(0, 0))
-results = process_all(batched_coords, batched_masks)  # (R, max_atoms, 3) → (R, ...)
-
-# Padding + Masking for variable sizes
-padded = jnp.concatenate([coords, jnp.zeros((max_atoms - M, 3))])
-mask = jnp.concatenate([jnp.ones(M, bool), jnp.zeros(max_atoms - M, bool)])
-```
+- Complex and brittle (padding, per‑residue index trees, vmap argument ordering).
+- No clear CPU benefit; overhead cancels geometry gains.
+- Will be replaced by a future frame‑batched MD path (simple vmap over frames).
 
 ---
 
-## Stage 4: Integration Layer ✅
+## Integration Layer (keep, simplified)
 
-**Status**: COMPLETE (12 tests passing)
-
-**Location**: `prolif/interactions/_jax/accelerator.py`
-
-### JAXAccelerator Class
-
-```python
-from prolif.interactions._jax import JAXAccelerator
-
-# Initialize with desired interactions
-accel = JAXAccelerator(interactions=['hydrophobic', 'ionic'])
-
-# Compute for multiple residues (batched)
-results = accel.compute_interactions(ligand, [res1, res2, res3])
-
-# Convenience methods
-result = accel.compute_single(ligand, residue)
-has_contact = accel.has_interaction(ligand, residue, 'hydrophobic')
-```
-
-### Convenience Functions
-
-```python
-from prolif.interactions._jax import compute_hydrophobic_fast, compute_ionic_fast
-import numpy as np
-
-# Direct numpy array input/output
-mask, dists = compute_hydrophobic_fast(ligand_coords, residue_coords)
-```
-
-### Design Notes
-
-- SMARTS matching stays in RDKit (well-optimized)
-- Geometry computation moves to JAX (parallelizable)
-- `extract_coords()` bridges RDKit molecules → JAX arrays
-- Results convert back to numpy for compatibility
+- Simple path: RDKit SMARTS + Python control; JAX for distances only.
+- Remove JAXAccelerator and residue-batched dispatch; keep only integration helpers.
 
 ---
 
@@ -246,11 +178,9 @@ These are for learning JAX patterns, not production use.
 
 ## Future Work
 
-1. **Full Fingerprint Integration**: Replace ProLIF's interaction detection loop
-2. **SMARTS Pre-filtering**: Filter atoms by type before JAX computation
-3. **More Interactions in Dispatch**: Add hbond, xbond, cation_pi, pi_stacking
-4. **JIT Compilation**: `@jax.jit` on entire pipeline
-5. **GPU Benchmarks**: Test CUDA/Metal backends
+1. Frame‑batched MD path: SMARTS once (structure), vmap across frames (coords).
+2. Optional GPU: only when F×R×N×M is large enough to amortize transfer/launch.
+3. Keep code surface area small; no re‑adding residue‑batched dispatch.
 
 ---
 
