@@ -724,3 +724,272 @@ def has_interactions_frames(
     results['PiStacking'] = jnp.stack(ps_out, axis=1) if R else jnp.zeros((F, 0), dtype=bool)
 
     return results
+
+
+def prepare_for_device(
+    lig_f: jnp.ndarray,
+    res_f: jnp.ndarray,
+    res_valid_mask: jnp.ndarray,
+    lig_masks: dict,
+    res_actor_masks: dict,
+    angle_idx: dict,
+    ring_idx: dict,
+    vdw_radii: tuple,
+    device: str = 'cpu',
+) -> tuple:
+    """Move frame-batched, small metadata arrays to a target device.
+
+    Args:
+        lig_f: (F, N, 3) ligand coordinates per frame.
+        res_f: (F, R, M, 3) residue coordinates per frame.
+        res_valid_mask: (R, M) boolean mask for valid atoms.
+        lig_masks: Dict of ligand SMARTS masks per interaction.
+        res_actor_masks: Dict of residue SMARTS masks per interaction.
+        angle_idx: Dict of angle indices from build_angle_indices.
+        ring_idx: Dict of ring indices from build_ring_cation_indices.
+        vdw_radii: Tuple of (lig_radii, res_radii, tolerance).
+        device: 'cpu' or 'gpu'. Coordinates remain on host; chunks are moved
+            transiently during computation. Reused small structures (masks,
+            indices, radii) are placed on the device.
+
+    Returns:
+        Tuple of all inputs moved to the specified device.
+        Returns unchanged inputs if device='cpu' or no GPU available.
+    """
+    if device != 'gpu':
+        return lig_f, res_f, res_valid_mask, lig_masks, res_actor_masks, angle_idx, ring_idx, vdw_radii
+
+    gpus = jax.devices('gpu')
+    if not gpus:
+        return lig_f, res_f, res_valid_mask, lig_masks, res_actor_masks, angle_idx, ring_idx, vdw_radii
+
+    dev = gpus[0]
+
+    res_valid_mask = jax.device_put(res_valid_mask, device=dev)
+    lig_masks = jax.tree_util.tree_map(lambda x: jax.device_put(x, device=dev), lig_masks)
+    res_actor_masks = jax.tree_util.tree_map(lambda x: jax.device_put(x, device=dev), res_actor_masks)
+
+    angle_idx = {
+        'hb': {
+            'acc_idx': jax.device_put(angle_idx['hb']['acc_idx'], device=dev),
+            'res_d_idx': [jax.device_put(a, device=dev) for a in angle_idx['hb']['res_d_idx']],
+            'res_h_idx': [jax.device_put(a, device=dev) for a in angle_idx['hb']['res_h_idx']],
+        },
+        'hb_donor': {
+            'lig_d_idx': jax.device_put(angle_idx['hb_donor']['lig_d_idx'], device=dev),
+            'lig_h_idx': jax.device_put(angle_idx['hb_donor']['lig_h_idx'], device=dev),
+            'res_a_idx': [jax.device_put(a, device=dev) for a in angle_idx['hb_donor']['res_a_idx']],
+        },
+        'xbacc': {
+            'lig_a_idx': jax.device_put(angle_idx['xbacc']['lig_a_idx'], device=dev),
+            'lig_r_idx': jax.device_put(angle_idx['xbacc']['lig_r_idx'], device=dev),
+            'res_x_idx': [jax.device_put(a, device=dev) for a in angle_idx['xbacc']['res_x_idx']],
+            'res_d_idx': [jax.device_put(a, device=dev) for a in angle_idx['xbacc']['res_d_idx']],
+        },
+        'xbdon': {
+            'lig_x_idx': jax.device_put(angle_idx['xbdon']['lig_x_idx'], device=dev),
+            'lig_d_idx': jax.device_put(angle_idx['xbdon']['lig_d_idx'], device=dev),
+            'res_a_idx': [jax.device_put(a, device=dev) for a in angle_idx['xbdon']['res_a_idx']],
+            'res_r_idx': [jax.device_put(a, device=dev) for a in angle_idx['xbdon']['res_r_idx']],
+        },
+    }
+
+    ring_idx = {
+        'lig_rings': [jax.device_put(a, device=dev) for a in ring_idx['lig_rings']],
+        'res_rings': [[jax.device_put(a, device=dev) for a in rr] for rr in ring_idx['res_rings']],
+        'lig_cations': jax.device_put(ring_idx['lig_cations'], device=dev),
+        'res_cations': [jax.device_put(a, device=dev) for a in ring_idx['res_cations']],
+        'pi': ring_idx['pi'],
+        'cp': ring_idx['cp'],
+    }
+
+    lr, rr, vdw_tol = vdw_radii
+    vdw_radii = (
+        jax.device_put(lr, device=dev),
+        jax.device_put(rr, device=dev),
+        vdw_tol,
+    )
+
+    return lig_f, res_f, res_valid_mask, lig_masks, res_actor_masks, angle_idx, ring_idx, vdw_radii
+
+
+def get_gpu_device():
+    """Return the first GPU device if available, else None."""
+    gpus = jax.devices('gpu')
+    return gpus[0] if gpus else None
+
+
+def get_gpu_memory_info() -> tuple[float, float] | None:
+    """Return (free_mb, total_mb) for GPU 0 if available, else None.
+
+    Tries NVML first, then falls back to parsing `nvidia-smi` output.
+    """
+    dev = get_gpu_device()
+    if dev is None:
+        return None
+
+    try:
+        import pynvml
+        pynvml.nvmlInit()
+        handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+        info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+        free_mb = info.free / (1024 * 1024)
+        total_mb = info.total / (1024 * 1024)
+        return float(free_mb), float(total_mb)
+    except Exception:
+        pass
+
+    try:
+        import subprocess
+        out = subprocess.check_output([
+            'nvidia-smi',
+            '--query-gpu=memory.free,memory.total',
+            '--format=csv,noheader,nounits'
+        ], stderr=subprocess.STDOUT, text=True)
+        line = out.strip().splitlines()[0]
+        cols = [c.strip() for c in line.split(',')]
+        free_mb = float(cols[0])
+        total_mb = float(cols[1])
+        return free_mb, total_mb
+    except Exception:
+        return None
+
+
+def estimate_memory_per_frame(
+    n_ligand_atoms: int,
+    n_residues: int,
+    max_residue_atoms: int,
+) -> float:
+    """Estimate GPU memory usage per frame in bytes.
+
+    This is a rough estimate accounting for:
+        - Distance matrices: R × N × M × 4 bytes
+        - Intermediate arrays and masks
+        - JAX overhead multiplier (~3x for JIT buffers)
+
+    Args:
+        n_ligand_atoms: Number of ligand atoms (N).
+        n_residues: Number of residues (R).
+        max_residue_atoms: Max atoms per residue (M).
+
+    Returns:
+        Estimated bytes per frame.
+    """
+    N, R, M = n_ligand_atoms, n_residues, max_residue_atoms
+
+    coords_lig = N * 3 * 4
+    coords_res = R * M * 3 * 4
+    distance_matrix = R * N * M * 4
+    masks_and_results = R * N * M * 4
+
+    base = coords_lig + coords_res + distance_matrix + masks_and_results
+
+    overhead_multiplier = 3.0
+
+    return base * overhead_multiplier
+
+
+def calculate_chunk_size(
+    n_ligand_atoms: int,
+    n_residues: int,
+    max_residue_atoms: int,
+    available_memory_mb: float | None = None,
+    memory_fraction: float = 0.7,
+) -> int:
+    """Calculate safe chunk size (frames per batch) for GPU.
+
+    Args:
+        n_ligand_atoms: Number of ligand atoms.
+        n_residues: Number of residues.
+        max_residue_atoms: Max atoms per residue.
+        available_memory_mb: GPU memory in MB. If None, auto-detect.
+        memory_fraction: Fraction of memory to use (default 0.7 for safety).
+
+    Returns:
+        Recommended number of frames per chunk.
+    """
+    if available_memory_mb is None:
+        mem = get_gpu_memory_info()
+        if mem is None:
+            return 1000
+        available_memory_mb, total_mb = mem[0], mem[1]
+
+    bytes_per_frame = estimate_memory_per_frame(
+        n_ligand_atoms, n_residues, max_residue_atoms
+    )
+
+    usable_bytes = available_memory_mb * 1024 * 1024 * memory_fraction
+    chunk_size = int(usable_bytes / bytes_per_frame)
+
+    chunk_size = max(1, min(chunk_size, 10000))
+
+    return chunk_size
+
+
+def chunked_has_interactions_frames(
+    lig_f: jnp.ndarray,
+    res_f: jnp.ndarray,
+    res_valid_mask: jnp.ndarray,
+    lig_masks: dict,
+    res_actor_masks: dict,
+    angle_idx: dict,
+    ring_idx: dict,
+    vdw_radii: tuple,
+    chunk_size: int | None = None,
+) -> dict[str, jnp.ndarray]:
+    """Evaluate interactions in memory-safe chunks.
+
+    Automatically chunks large trajectories to avoid GPU OOM.
+    Results are concatenated along the frame dimension.
+
+    Args:
+        lig_f: (F, N, 3) ligand coordinates.
+        res_f: (F, R, M, 3) residue coordinates.
+        res_valid_mask: (R, M) valid atom mask.
+        lig_masks: SMARTS masks per interaction.
+        res_actor_masks: Residue SMARTS masks.
+        angle_idx: Angle indices dict.
+        ring_idx: Ring indices dict.
+        vdw_radii: VdW radii tuple.
+        chunk_size: Frames per chunk. If None, auto-calculate.
+
+    Returns:
+        Dict of interaction name → (F, R) boolean arrays.
+    """
+    F = int(lig_f.shape[0])
+    N = int(lig_f.shape[1])
+    R = int(res_f.shape[1])
+    M = int(res_f.shape[2])
+
+    if chunk_size is None:
+        chunk_size = calculate_chunk_size(N, R, M)
+
+    dev = get_gpu_device()
+
+    all_results = []
+    for i in range(0, F, chunk_size):
+        j = min(i + chunk_size, F)
+
+        if dev is not None:
+            chunk_lig = jax.device_put(lig_f[i:j], device=dev)
+            chunk_res = jax.device_put(res_f[i:j], device=dev)
+        else:
+            chunk_lig = lig_f[i:j]
+            chunk_res = res_f[i:j]
+
+        chunk_result = has_interactions_frames(
+            chunk_lig, chunk_res, res_valid_mask,
+            lig_masks, res_actor_masks, angle_idx, ring_idx, vdw_radii
+        )
+
+        chunk_result = jax.device_get(chunk_result)
+        all_results.append(chunk_result)
+
+    if len(all_results) == 1:
+        return all_results[0]
+
+    combined = {}
+    for key in all_results[0].keys():
+        combined[key] = jnp.concatenate([r[key] for r in all_results], axis=0)
+
+    return combined

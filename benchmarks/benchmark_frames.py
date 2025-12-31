@@ -28,6 +28,9 @@ from prolif.interactions._jax import (
     build_angle_indices as jax_build_angle_indices,
     build_ring_cation_indices as jax_build_ring_cation_indices,
     build_vdw_radii as jax_build_vdw_radii,
+    prepare_for_device,
+    get_gpu_device,
+    calculate_chunk_size,
 )
 
 
@@ -415,55 +418,37 @@ def jax_benchmark(lig_f, res_f, res_valid_mask, lig_masks, res_actor_masks, angl
     synchronizing with block_until_ready to measure device execution.
     """
     import jax
-    import jax.numpy as jnp
 
-    # Optional: place small, structure-only arrays on device
-    if use_gpu:
-        gpus = jax.devices('gpu')
-        if gpus:
-            dev = gpus[0]
-            res_valid_mask = jax.device_put(res_valid_mask, device=dev)
-            lig_masks = jax.tree_util.tree_map(lambda x: jax.device_put(x, device=dev), lig_masks)
-            res_actor_masks = jax.tree_util.tree_map(lambda x: jax.device_put(x, device=dev), res_actor_masks)
-            angle_idx = {
-                'hb': {
-                    'acc_idx': jax.device_put(angle_idx['hb']['acc_idx'], device=dev),
-                    'res_d_idx': [jax.device_put(a, device=dev) for a in angle_idx['hb']['res_d_idx']],
-                    'res_h_idx': [jax.device_put(a, device=dev) for a in angle_idx['hb']['res_h_idx']],
-                },
-                'xbacc': {
-                    'lig_a_idx': jax.device_put(angle_idx['xbacc']['lig_a_idx'], device=dev),
-                    'lig_r_idx': jax.device_put(angle_idx['xbacc']['lig_r_idx'], device=dev),
-                    'res_x_idx': [jax.device_put(a, device=dev) for a in angle_idx['xbacc']['res_x_idx']],
-                    'res_d_idx': [jax.device_put(a, device=dev) for a in angle_idx['xbacc']['res_d_idx']],
-                },
-            }
-            ring_idx = {
-                'lig_rings': [jax.device_put(a, device=dev) for a in ring_idx['lig_rings']],
-                'res_rings': [[jax.device_put(a, device=dev) for a in rr] for rr in ring_idx['res_rings']],
-                'lig_cations': jax.device_put(ring_idx['lig_cations'], device=dev),
-                'res_cations': [jax.device_put(a, device=dev) for a in ring_idx['res_cations']],
-                'pi': ring_idx['pi'],
-                'cp': ring_idx['cp'],
-            }
-            lr, rr, vdw_tol = vdw_radii
-            vdw_radii = (
-                jax.device_put(lr, device=dev),
-                jax.device_put(rr, device=dev),
-                vdw_tol,
-            )
-        else:
-            use_gpu = False
+    # Move small, structure-only arrays to device
+    device = 'gpu' if use_gpu else 'cpu'
+    lig_f, res_f, res_valid_mask, lig_masks, res_actor_masks, angle_idx, ring_idx, vdw_radii = prepare_for_device(
+        lig_f, res_f, res_valid_mask, lig_masks, res_actor_masks, angle_idx, ring_idx, vdw_radii,
+        device=device,
+    )
+
+    # Check if GPU is actually available
+    dev = get_gpu_device()
+    if use_gpu and dev is None:
+        print("GPU requested (--gpu) but no GPU detected; running on CPU.")
+        use_gpu = False
 
     # Timing loop
     times = []
     mem_peak = None
     mem_total = None
+
+    # Calculate optimal chunk size for GPU
+    N = int(lig_f.shape[1])
+    R = int(res_f.shape[1])
+    M = int(res_f.shape[2])
+    step = calculate_chunk_size(N, R, M) if use_gpu else None
+    if use_gpu and step:
+        print(f"Auto-calculated chunk size: {step} frames (N={N}, R={R}, M={M})")
+
     for _ in range(runs):
         t0 = time.perf_counter()
         if use_gpu:
             F = int(lig_f.shape[0])
-            step = 2048
             for i in range(0, F, step):
                 j = min(i + step, F)
                 chunk_l = jax.device_put(lig_f[i:j], device=dev)
@@ -474,14 +459,13 @@ def jax_benchmark(lig_f, res_f, res_valid_mask, lig_masks, res_actor_masks, angl
                 last = next(iter(res.values()))
                 _ = last.block_until_ready()
                 try:
-                    import pynvml
-                    pynvml.nvmlInit()
-                    h = pynvml.nvmlDeviceGetHandleByIndex(0)
-                    m = pynvml.nvmlDeviceGetMemoryInfo(h)
-                    used = m.used / (1024 * 1024)
-                    total = m.total / (1024 * 1024)
-                    mem_peak = max(mem_peak or 0.0, used)
-                    mem_total = total
+                    from prolif.interactions._jax import get_gpu_memory_info
+                    mem = get_gpu_memory_info()
+                    if mem is not None:
+                        free_mb, total_mb = mem
+                        used_mb = total_mb - free_mb
+                        mem_peak = max(mem_peak or 0.0, used_mb)
+                        mem_total = total_mb
                 except Exception:
                     pass
         else:

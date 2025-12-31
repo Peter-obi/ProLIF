@@ -29,6 +29,12 @@ if JAX_AVAILABLE:
         xbdonor_frames,
         cationpi_frames,
         pistacking_frames,
+        prepare_for_device,
+        get_gpu_device,
+        get_gpu_memory_info,
+        estimate_memory_per_frame,
+        calculate_chunk_size,
+        chunked_has_interactions_frames,
     )
 
     __all__ = [
@@ -48,6 +54,12 @@ if JAX_AVAILABLE:
         "xbdonor_frames",
         "cationpi_frames",
         "pistacking_frames",
+        "prepare_for_device",
+        "get_gpu_device",
+        "get_gpu_memory_info",
+        "estimate_memory_per_frame",
+        "calculate_chunk_size",
+        "chunked_has_interactions_frames",
     ]
 else:
     __all__ = ["JAX_AVAILABLE"]

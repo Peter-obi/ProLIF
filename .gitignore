@@ -178,3 +178,4 @@ docs/notebooks/*.html
 *.pkl
 learnings.txt
 prolif/interactions/_jax/*_guide.py
+cuda.md
