@@ -814,8 +814,14 @@ def prepare_for_device(
 
 
 def get_gpu_device():
-    """Return the first GPU device if available, else None."""
-    gpus = jax.devices('gpu')
+    """Return the first GPU device if available, else None.
+
+    Safe on CPU-only installs where requesting 'gpu' would raise.
+    """
+    try:
+        gpus = jax.devices('gpu')
+    except Exception:
+        return None
     return gpus[0] if gpus else None
 
 

@@ -411,7 +411,7 @@ def _complete_angle_indices(angle_idx: dict, residues: list) -> dict:
         }
     return angle_idx
 
-def jax_benchmark(lig_f, res_f, res_valid_mask, lig_masks, res_actor_masks, angle_idx, ring_idx, vdw_radii, runs: int, use_gpu: bool = False) -> BenchmarkResult:
+def jax_benchmark(lig_f, res_f, res_valid_mask, lig_masks, res_actor_masks, angle_idx, ring_idx, vdw_radii, runs: int, use_gpu: bool = False, chunk_size: int | None = None) -> BenchmarkResult:
     """Benchmark JAX frame-batched geometry for nine interactions.
 
     Places arrays on GPU when requested and times the end-to-end evaluation,
@@ -437,13 +437,18 @@ def jax_benchmark(lig_f, res_f, res_valid_mask, lig_masks, res_actor_masks, angl
     mem_peak = None
     mem_total = None
 
-    # Calculate optimal chunk size for GPU
+    # Determine chunk size for GPU path
     N = int(lig_f.shape[1])
     R = int(res_f.shape[1])
     M = int(res_f.shape[2])
-    step = calculate_chunk_size(N, R, M) if use_gpu else None
-    if use_gpu and step:
-        print(f"Auto-calculated chunk size: {step} frames (N={N}, R={R}, M={M})")
+    step = None
+    if use_gpu:
+        if chunk_size is not None and chunk_size > 0:
+            step = int(chunk_size)
+            print(f"Manual chunk size: {step} frames (N={N}, R={R}, M={M})")
+        else:
+            step = calculate_chunk_size(N, R, M)
+            print(f"Auto-calculated chunk size: {step} frames (N={N}, R={R}, M={M})")
 
     for _ in range(runs):
         t0 = time.perf_counter()
@@ -778,6 +783,7 @@ def main():
     parser.add_argument('--runs', type=int, default=3, help='Number of timed runs')
     parser.add_argument('--max-frames', type=int, default=None, help='Cap frames processed from the trajectory')
     parser.add_argument('--gpu', action='store_true', help='Run JAX path on GPU (device_put + sync timing)')
+    parser.add_argument('--chunk-size', '--chunk_size', type=int, default=None, help='Override GPU frames-per-chunk (auto by default)')
     parser.add_argument('--top', type=str, default=None, help='Topology file path (e.g., PDB/PRMTOP/GRO)')
     parser.add_argument('--traj', type=str, nargs='*', default=None, help='Trajectory file(s) (e.g., XTC/DCD)')
     parser.add_argument('--ligsel', type=str, default='resname LIG', help='MDAnalysis ligand selection string')
@@ -797,8 +803,13 @@ def main():
     angle_idx = _complete_angle_indices(angle_idx, residues)
     ring_idx = jax_build_ring_cation_indices(lig_mol, residues)
     vdw_radii = jax_build_vdw_radii(lig_mol, residues, lig_ag=lig_ag, residue_ags=residue_ags, use_real=True)
+    chunk_override = args.chunk_size
+    if args.gpu and (args.max_frames is not None) and (chunk_override is None or chunk_override <= 0):
+        # If user capped frames and did not set chunk size, process in one chunk (skip mem query)
+        chunk_override = F
+
     jax_res = jax_benchmark(
-        lig_f, res_f, res_valid_mask, lig_masks, res_actor_masks, angle_idx, ring_idx, vdw_radii, args.runs, use_gpu=bool(args.gpu)
+        lig_f, res_f, res_valid_mask, lig_masks, res_actor_masks, angle_idx, ring_idx, vdw_radii, args.runs, use_gpu=bool(args.gpu), chunk_size=chunk_override
     )
     prolif_res = prolif_benchmark(lig_mol, residues, F, args.runs)
 
