@@ -19,9 +19,6 @@ from prolif.interactions._jax.primitives import (
 )
 
 
-# =============================================================================
-# Task 1.2: pairwise_distances tests
-# =============================================================================
 class TestPairwiseDistances:
     def test_same_points(self):
         """Distance from point to itself should be 0."""
@@ -61,9 +58,6 @@ class TestPairwiseDistances:
         assert_allclose(result[0], [1.0, 1.0, 1.0], atol=1e-6)
 
 
-# =============================================================================
-# Task 1.3: batch_centroids tests
-# =============================================================================
 class TestBatchCentroids:
     def test_single_point_centroid(self):
         """Centroid of a single point is the point itself."""
@@ -85,9 +79,6 @@ class TestBatchCentroids:
         assert_allclose(result[1], [11.0, 31 / 3, 10.0], atol=1e-6)
 
 
-# =============================================================================
-# Task 1.4: ring_normal tests
-# =============================================================================
 class TestRingNormal:
     def test_xy_plane_ring(self, xy_plane_ring):
         """Ring in XY plane should have normal along Z-axis."""
@@ -120,9 +111,6 @@ class TestRingNormal:
         assert_allclose(jnp.linalg.norm(result), 1.0, atol=1e-6)
 
 
-# =============================================================================
-# Task 1.5: batch_ring_normals tests
-# =============================================================================
 class TestBatchRingNormals:
     def test_two_rings(self):
         """Test normals for two rings in different planes."""
@@ -148,9 +136,6 @@ class TestBatchRingNormals:
         assert_allclose(jnp.abs(result[1]), [0.0, 1.0, 0.0], atol=1e-6)
 
 
-# =============================================================================
-# Task 1.6: angle_between_vectors tests
-# =============================================================================
 class TestAngleBetweenVectors:
     def test_perpendicular_vectors(self):
         """90 degrees between perpendicular vectors."""
@@ -191,9 +176,6 @@ class TestAngleBetweenVectors:
         assert_allclose(result[1], 0.0, atol=1e-6)  # 0 degrees (same)
 
 
-# =============================================================================
-# Task 1.7: angle_at_vertex tests
-# =============================================================================
 class TestAngleAtVertex:
     def test_right_angle(self):
         """90 degree angle at origin."""
@@ -228,9 +210,6 @@ class TestAngleAtVertex:
         assert_allclose(result, jnp.pi / 2, atol=1e-6)
 
 
-# =============================================================================
-# Task 1.8: point_to_plane_distance tests
-# =============================================================================
 class TestPointToPlaneDistance:
     def test_points_above_and_below(self):
         """Test points above, below, and on XY plane."""
@@ -270,9 +249,6 @@ class TestPointToPlaneDistance:
         assert_allclose(result[0], 10.0, atol=1e-6)
 
 
-# =============================================================================
-# Edge cases and numerical stability
-# =============================================================================
 class TestEdgeCases:
     def test_very_small_distances(self):
         """Test numerical stability with very small distances."""
