@@ -43,11 +43,8 @@ def pairwise_distances_frames(
     """
 
     def _frame_distances(lig: jnp.ndarray, res_batch: jnp.ndarray) -> jnp.ndarray:
-        # res_batch: (R, M, 3)
-        # Map over residues for a single frame → (R, N, M)
         return jax.vmap(lambda rc: pairwise_distances(lig, rc))(res_batch)
 
-    # Map over frames → (F, R, N, M)
     return jax.vmap(_frame_distances)(lig_coords_f, res_coords_f)
 
 
@@ -78,16 +75,14 @@ def hbacceptor_frames(
         distances: (F, Na, K) A–D distances
         angles: (F, Na, K) D–H–A angles (deg)
     """
-    acc = lig_coords_f[:, acc_idx, :]            # (F, Na, 3)
-    donors = res_coords_f[:, d_idx, :]           # (F, K, 3)
-    hydrogens = res_coords_f[:, h_idx, :]        # (F, K, 3)
+    acc = lig_coords_f[:, acc_idx, :]
+    donors = res_coords_f[:, d_idx, :]
+    hydrogens = res_coords_f[:, h_idx, :]
 
-    # Distances A–D per frame: (F, Na, K)
     dvec = acc[:, :, None, :] - donors[:, None, :, :]
     dists = jnp.linalg.norm(dvec, axis=-1)
     dist_ok = dists <= distance_cutoff
 
-    # Angles D–H–A at H vertex, broadcast to (F, Na, K)
     ang = angle_at_vertex(
         donors[:, None, :, :],
         hydrogens[:, None, :, :],
@@ -115,12 +110,12 @@ def hbdonor_frames(
 
     Returns (mask, distances, angles) with shapes (F, Nd, Ka).
     """
-    donors = lig_coords_f[:, d_idx, :]           # (F, Nd, 3)
-    hydrogens = lig_coords_f[:, h_idx, :]        # (F, Nd, 3)
-    acc = res_coords_f[:, acc_idx, :]            # (F, Ka, 3)
+    donors = lig_coords_f[:, d_idx, :]
+    hydrogens = lig_coords_f[:, h_idx, :]
+    acc = res_coords_f[:, acc_idx, :]
 
     dvec = donors[:, :, None, :] - acc[:, None, :, :]
-    dists = jnp.linalg.norm(dvec, axis=-1)       # (F, Nd, Ka)
+    dists = jnp.linalg.norm(dvec, axis=-1)
     dist_ok = dists <= distance_cutoff
 
     ang = angle_at_vertex(
@@ -152,16 +147,15 @@ def xbacceptor_frames(
 
     Returns (mask, distances[A–X], axd_angles, xar_angles) with shapes (F, Na, K).
     """
-    acc = lig_coords_f[:, a_idx, :]              # (F, Na, 3)
-    neigh = lig_coords_f[:, r_idx, :]            # (F, Na, 3)
-    hal = res_coords_f[:, x_idx, :]              # (F, K, 3)
-    don = res_coords_f[:, d_idx, :]              # (F, K, 3)
+    acc = lig_coords_f[:, a_idx, :]
+    neigh = lig_coords_f[:, r_idx, :]
+    hal = res_coords_f[:, x_idx, :]
+    don = res_coords_f[:, d_idx, :]
 
     dvec = acc[:, :, None, :] - hal[:, None, :, :]
-    dists = jnp.linalg.norm(dvec, axis=-1)       # (F, Na, K)
+    dists = jnp.linalg.norm(dvec, axis=-1)
     dist_ok = dists <= distance_cutoff
 
-    # A–X–D at X vertex → (F, Na, K)
     axd = angle_at_vertex(
         acc[:, :, None, :],
         hal[:, None, :, :],
@@ -170,7 +164,6 @@ def xbacceptor_frames(
     axd_deg = jnp.degrees(axd)
     axd_ok = (axd_deg >= axd_angle_min) & (axd_deg <= axd_angle_max)
 
-    # X–A–R at A vertex → (F, Na, K)
     xar = angle_at_vertex(
         hal[:, None, :, :],
         acc[:, :, None, :],
@@ -201,10 +194,10 @@ def xbdonor_frames(
 
     Returns (mask, distances[X–A], axd_angles, xar_angles) with shapes (F, Nx, Ka).
     """
-    hal = lig_coords_f[:, x_idx, :]              # (F, Nx, 3)
-    don = lig_coords_f[:, d_idx, :]              # (F, Nx, 3)
-    acc = res_coords_f[:, a_idx, :]              # (F, Ka, 3)
-    neigh = res_coords_f[:, r_idx, :]            # (F, Ka, 3)
+    hal = lig_coords_f[:, x_idx, :]
+    don = lig_coords_f[:, d_idx, :]
+    acc = res_coords_f[:, a_idx, :]
+    neigh = res_coords_f[:, r_idx, :]
 
     dvec = hal[:, :, None, :] - acc[:, None, :, :]
     dists = jnp.linalg.norm(dvec, axis=-1)
@@ -230,7 +223,6 @@ def xbdonor_frames(
     return mask, dists, axd_deg, xar_deg
 
 
-# ---------------------------- Ring-based helpers ---------------------------- #
 
 def _ring_centroids_normals_frames(
     coords_f: jnp.ndarray,
@@ -250,8 +242,8 @@ def _ring_centroids_normals_frames(
     centroids_list = []
     normals_list = []
     for ring_idx in rings:
-        rc = coords_f[:, ring_idx, :]  # (F, S, 3)
-        centroid = rc.mean(axis=1)     # (F, 3)
+        rc = coords_f[:, ring_idx, :]
+        centroid = rc.mean(axis=1)
         v1 = rc[:, 0, :] - centroid
         v2 = rc[:, 1, :] - centroid
         n = jnp.cross(v1, v2)
@@ -285,17 +277,16 @@ def cationpi_frames(
         angles: (F, Kr, Kc) normal–centroid vector angles (deg)
     """
     F = int(ring_coords_f.shape[0])
-    centroids, normals = _ring_centroids_normals_frames(ring_coords_f, ring_list)  # (F, Kr, 3)
+    centroids, normals = _ring_centroids_normals_frames(ring_coords_f, ring_list)
     cations = cation_coords_f[:, cation_idx, :] if cation_idx.size else jnp.zeros((F, 0, 3))
     if centroids.shape[1] == 0 or cations.shape[1] == 0:
         z = jnp.zeros((F, centroids.shape[1], cations.shape[1]))
         return z.astype(bool), z, z
 
-    # Distances
-    vec = cations[:, None, :, :] - centroids[:, :, None, :]  # (F, Kr, Kc, 3)
+    vec = cations[:, None, :, :] - centroids[:, :, None, :]
     dists = jnp.linalg.norm(vec, axis=-1)
     dist_ok = dists <= distance_cutoff
-    # Angle between ring normal and centroid→cation
+
     ang = angle_between_vectors(normals[:, :, None, :], vec)
     ang_deg = jnp.degrees(ang)
     ang_ok = (ang_deg >= angle_min) & (ang_deg <= angle_max)
@@ -324,23 +315,20 @@ def pistacking_frames(
         ncc_angles: (F, Kl, Kr) min of the two normal→centroid angles (deg)
     """
     F = int(lig_coords_f.shape[0])
-    lc, ln = _ring_centroids_normals_frames(lig_coords_f, lig_rings)  # (F, Kl, 3)
-    rc, rn = _ring_centroids_normals_frames(res_coords_f, res_rings)  # (F, Kr, 3)
+    lc, ln = _ring_centroids_normals_frames(lig_coords_f, lig_rings)
+    rc, rn = _ring_centroids_normals_frames(res_coords_f, res_rings)
     if lc.shape[1] == 0 or rc.shape[1] == 0:
         z = jnp.zeros((F, lc.shape[1], rc.shape[1]))
         return z.astype(bool), z, z, z
 
-    # Distances
-    cc_vec = rc[:, None, :, :] - lc[:, :, None, :]  # (F, Kl, Kr, 3)
+    cc_vec = rc[:, None, :, :] - lc[:, :, None, :]
     dists = jnp.linalg.norm(cc_vec, axis=-1)
     dist_ok = dists <= distance_cutoff
 
-    # Plane angle (between normals)
     pa = angle_between_vectors(ln[:, :, None, :], rn[:, None, :, :])
     pa_deg = jnp.degrees(pa)
     pa_ok = (pa_deg >= plane_angle_min) & (pa_deg <= plane_angle_max)
 
-    # Normal→centroid angles (either ring)
     n1 = angle_between_vectors(ln[:, :, None, :], cc_vec)
     n2 = angle_between_vectors(rn[:, None, :, :], -cc_vec)
     n1_deg = jnp.degrees(n1)

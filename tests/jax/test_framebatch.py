@@ -9,19 +9,24 @@ from numpy.testing import assert_allclose
 
 
 def test_pairwise_distances_frames_shapes_and_values():
+    """Validate shapes and a few distances for a small synthetic setup.
+
+    The setup uses F=2 frames, R=2 residues, N=1 ligand atom, M=2 atoms per
+    residue (padded not required here). Different coordinates across frames
+    ensure the distance tensor varies in time.
+    """
     from prolif.interactions._jax.framebatch import pairwise_distances_frames
 
-    # F=2, R=2, N=1, M=2
     lig = jnp.array([
-        [[0.0, 0.0, 0.0]],  # frame 0
-        [[1.0, 0.0, 0.0]],  # frame 1
+        [[0.0, 0.0, 0.0]],
+        [[1.0, 0.0, 0.0]],
     ])
     res = jnp.array([
-        [  # frame 0, residues 0..1
+        [
             [[0.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
             [[1.0, 0.0, 0.0], [1.0, 1.0, 0.0]],
         ],
-        [  # frame 1
+        [
             [[0.0, 0.0, 0.0], [1.0, 1.0, 0.0]],
             [[1.0, 0.0, 0.0], [2.0, 2.0, 0.0]],
         ],
@@ -30,19 +35,22 @@ def test_pairwise_distances_frames_shapes_and_values():
     d = pairwise_distances_frames(lig, res)
     assert d.shape == (2, 2, 1, 2)
 
-    # Check a few entries
     assert_allclose(d[0, 0, 0, 0], 0.0, atol=1e-6)
     assert_allclose(d[0, 0, 0, 1], 1.0, atol=1e-6)
-    assert_allclose(d[1, 1, 0, 1], jnp.sqrt(5.0), atol=1e-6)  # dist((1,0,0),(2,2,0))
+    assert_allclose(d[1, 1, 0, 1], jnp.sqrt(5.0), atol=1e-6)
 
 
 def test_hbacceptor_frames_true_mask():
+    """Construct a linear D–H–A configuration that passes HB acceptor criteria.
+
+    Two frames are used with an acceptor shifted but still under cutoff; the
+    D–H–A angle remains 180 degrees, and the A–D distance is within 3.5 Å.
+    """
     from prolif.interactions._jax.framebatch import hbacceptor_frames
 
-    # Construct geometry with D(0,0,0), H(1,0,0), A(2,0,0) → angle 180°, AD=2
     lig = jnp.array([
-        [[2.0, 0.0, 0.0]],  # frame 0: A
-        [[3.0, 0.0, 0.0]],  # frame 1: farther A but still within cutoff 3.5
+        [[2.0, 0.0, 0.0]],
+        [[3.0, 0.0, 0.0]],
     ])
     res = jnp.array([
         [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
@@ -62,15 +70,17 @@ def test_hbacceptor_frames_true_mask():
 
 
 def test_hbdonor_frames_true_then_false():
+    """Donor/H on ligand and acceptor on residue; first frame true, second false.
+
+    The first frame satisfies distance and angle; the second moves the acceptor
+    far enough to fail the distance criterion.
+    """
     from prolif.interactions._jax.framebatch import hbdonor_frames
 
-    # Donor/H in ligand, acceptor in residue
-    # frame0: D(0,0,0), H(1,0,0), A(2,0,0) → true
-    # frame1: A(10,0,0) → false by distance
     lig = jnp.array([
         [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
         [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
-    ])  # shape (F=2, Nd=2, 3); indices d=0, h=1
+    ])
     res = jnp.array([
         [[2.0, 0.0, 0.0]],
         [[10.0, 0.0, 0.0]],
@@ -87,13 +97,16 @@ def test_hbdonor_frames_true_then_false():
 
 
 def test_xbacceptor_frames_true_then_false():
+    """Ligand as acceptor with neighbor R; residue as X–D donor.
+
+    The first frame meets AX distance and both angle constraints; the second
+    moves A far away to fail the distance criterion.
+    """
     from prolif.interactions._jax.framebatch import xbacceptor_frames
 
-    # A(1,0,0), R(1,1,0) on ligand; X(0,0,0), D(-1,0,0) on residue
-    # A–X=1, A–X–D=180, X–A–R=90 → true
     lig = jnp.array([
         [[1.0, 0.0, 0.0], [1.0, 1.0, 0.0]],
-        [[10.0, 0.0, 0.0], [1.0, 1.0, 0.0]],  # far A → false by distance
+        [[10.0, 0.0, 0.0], [1.0, 1.0, 0.0]],
     ])
     res = jnp.array([
         [[0.0, 0.0, 0.0], [-1.0, 0.0, 0.0]],
@@ -113,16 +126,20 @@ def test_xbacceptor_frames_true_then_false():
 
 
 def test_xbdonor_frames_true_then_false():
+    """Ligand as X–D donor; residue as acceptor with neighbor R.
+
+    The first frame meets XA distance and angle constraints; the second places
+    A far away to fail by distance.
+    """
     from prolif.interactions._jax.framebatch import xbdonor_frames
 
-    # X(0,0,0), D(-1,0,0) on ligand; A(1,0,0), R(1,1,0) on residue
     lig = jnp.array([
         [[0.0, 0.0, 0.0], [-1.0, 0.0, 0.0]],
         [[0.0, 0.0, 0.0], [-1.0, 0.0, 0.0]],
     ])
     res = jnp.array([
         [[1.0, 0.0, 0.0], [1.0, 1.0, 0.0]],
-        [[10.0, 0.0, 0.0], [1.0, 1.0, 0.0]],  # far A → false by distance
+        [[10.0, 0.0, 0.0], [1.0, 1.0, 0.0]],
     ])
     x_idx = jnp.array([0])
     d_idx = jnp.array([1])
@@ -135,4 +152,3 @@ def test_xbdonor_frames_true_then_false():
     assert bool(mask[1, 0, 0]) is False
     assert_allclose(axd[0, 0, 0], 180.0, atol=1e-4)
     assert_allclose(xar[0, 0, 0], 90.0, atol=1e-4)
-

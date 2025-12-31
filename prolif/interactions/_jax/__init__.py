@@ -8,15 +8,14 @@ Expose only the minimal, stable API:
 """
 
 try:
-    import jax  # noqa: F401
+    import jax
     JAX_AVAILABLE = True
-except ImportError:  # pragma: no cover
+except ImportError:
     JAX_AVAILABLE = False
 
 if JAX_AVAILABLE:
     from .primitives import pairwise_distances
     from .integration import compute_distances_batch, has_interaction_batch
-    # Frame-batched helpers
     from .framebatch import (
         pairwise_distances_frames,
         hbacceptor_frames,
@@ -32,7 +31,6 @@ if JAX_AVAILABLE:
         "pairwise_distances",
         "compute_distances_batch",
         "has_interaction_batch",
-        # Frame-batched
         "pairwise_distances_frames",
         "hbacceptor_frames",
         "hbdonor_frames",
