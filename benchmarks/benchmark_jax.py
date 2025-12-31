@@ -161,10 +161,10 @@ def benchmark_prolif_original(lig_mol, residues, n_runs: int = 100) -> Benchmark
         PiStacking(),
     ]
 
-    # Warmup
+    # Warmup (force generator consumption)
     for res in residues[:3]:
         for interaction in interactions:
-            _ = interaction(lig_mol, res)
+            _ = interaction.any(lig_mol, res)
 
     # Timed runs
     times = []
@@ -172,7 +172,7 @@ def benchmark_prolif_original(lig_mol, residues, n_runs: int = 100) -> Benchmark
         start = time.perf_counter()
         for res in residues:
             for interaction in interactions:
-                _ = interaction(lig_mol, res)
+                _ = interaction.any(lig_mol, res)
         times.append((time.perf_counter() - start) * 1000)  # Convert to ms
 
     times = np.array(times)
@@ -187,7 +187,7 @@ def benchmark_prolif_original(lig_mol, residues, n_runs: int = 100) -> Benchmark
     )
 
 
-def benchmark_jax_cpu(lig_mol, residues, n_runs: int = 100) -> BenchmarkResult:
+def benchmark_jax_cpu(lig_mol, residues, n_runs: int = 100, *, prefilter=False, gate_angles=False) -> BenchmarkResult:
     """Benchmark JAX implementation on CPU."""
     import jax
     jax.config.update('jax_platform_name', 'cpu')
@@ -198,7 +198,7 @@ def benchmark_jax_cpu(lig_mol, residues, n_runs: int = 100) -> BenchmarkResult:
     accel = JAXAccelerator(interactions=[
         'Hydrophobic', 'Cationic', 'Anionic', 'VdWContact',
         'HBDonor', 'HBAcceptor', 'XBDonor', 'CationPi', 'PiStacking',
-    ])
+    ], prefilter_smarts=prefilter, gate_angles_by_distance=gate_angles)
 
     # Warmup (includes JIT compilation)
     _ = accel.compute_interactions(lig_mol, residues)
@@ -282,7 +282,7 @@ def _tile_residues(residues, n: int):
     return tiled
 
 
-def benchmark_scaling(lig_mol, residues, backend: str = 'cpu', counts: list[int] | None = None) -> list[BenchmarkResult]:
+def benchmark_scaling(lig_mol, residues, backend: str = 'cpu', counts: list[int] | None = None, *, prefilter=False, gate_angles=False) -> list[BenchmarkResult]:
     """Benchmark scaling with different numbers of residues."""
     import jax
 
@@ -297,7 +297,7 @@ def benchmark_scaling(lig_mol, residues, backend: str = 'cpu', counts: list[int]
 
     from prolif.interactions._jax import JAXAccelerator
 
-    accel = JAXAccelerator(interactions=['Hydrophobic'])
+    accel = JAXAccelerator(interactions=['Hydrophobic'], prefilter_smarts=prefilter, gate_angles_by_distance=gate_angles)
 
     results = []
     n_residue_counts = counts or [1, 5, 10, 20, len(residues)]
@@ -364,6 +364,10 @@ def main():
                         help="Comma-separated residue counts for scaling (e.g., 1,5,10,20,50,100)")
     parser.add_argument('--n-runs', type=int, default=100,
                         help="Number of runs per benchmark (default: 100)")
+    parser.add_argument('--prefilter', action='store_true',
+                        help="Enable SMARTS prefiltering in JAX accelerator")
+    parser.add_argument('--gate-angles', action='store_true',
+                        help="Enable distance-gated angle computation in JAX")
     args = parser.parse_args()
 
     print_header()
@@ -397,7 +401,7 @@ def main():
     # JAX CPU benchmark
     if not args.gpu_only:
         print("Running JAX CPU benchmark...")
-        results.append(benchmark_jax_cpu(lig_mol, residues, args.n_runs))
+        results.append(benchmark_jax_cpu(lig_mol, residues, args.n_runs, prefilter=args.prefilter, gate_angles=args.gate_angles))
 
     # JAX GPU benchmark
     if not args.cpu_only:
@@ -435,7 +439,7 @@ def main():
 
         if not args.gpu_only:
             print("\nCPU Scaling:")
-            scaling_results = benchmark_scaling(lig_mol, residues, 'cpu', counts)
+            scaling_results = benchmark_scaling(lig_mol, residues, 'cpu', counts, prefilter=args.prefilter, gate_angles=args.gate_angles)
             print_results(scaling_results)
 
         if not args.cpu_only:

@@ -57,6 +57,8 @@ class JAXAccelerator:
         self,
         interactions: list[str] | None = None,
         distance_cutoffs: dict[str, float] | None = None,
+        prefilter_smarts: bool = False,
+        gate_angles_by_distance: bool = False,
     ):
         """Initialize the JAX accelerator.
 
@@ -75,6 +77,9 @@ class JAXAccelerator:
         if distance_cutoffs:
             self.distance_cutoffs.update(distance_cutoffs)
         self._layout_cache: dict[tuple, dict] = {}
+        self._ring_cache: dict[int, list[list[int]]] = {}
+        self.prefilter_smarts = prefilter_smarts
+        self.gate_angles_by_distance = gate_angles_by_distance
 
     def extract_coords(self, mol) -> tuple[jnp.ndarray, list[str]]:
         """Extract coordinates and elements from an RDKit molecule.
@@ -123,17 +128,110 @@ class JAXAccelerator:
             return mol.ToRDKit()
         return None
 
+    def _smarts_prefilter_masks(self, ligand, residues, interaction_types, max_atoms):
+        """Return per-interaction candidate masks for ligand and residues.
+
+        Ligand mask shape: (T, N)
+        Residue mask shape: (R, T, max_atoms)
+
+        Only distance-only interactions use SMARTS prefilter here.
+        Other interactions receive all-True masks (no filtering).
+        """
+        from prolif.interactions import Hydrophobic, Cationic, Anionic, MetalDonor, MetalAcceptor
+
+        rdl = self._to_rdmol(ligand)
+        rds = [self._to_rdmol(r) for r in residues]
+
+        N = int(ligand.GetNumAtoms() if hasattr(ligand, 'GetNumAtoms') else rdl.GetNumAtoms())
+        T = len(interaction_types)
+
+        lig_masks = []
+        res_masks_rows = []
+
+        # Build a mapping from type string to RDKit SMARTS patterns (lig, prot)
+        patterns = {}
+        for t in interaction_types:
+            if t == 'Hydrophobic':
+                inter = Hydrophobic()
+                patterns[t] = (inter.lig_pattern, inter.prot_pattern)
+            elif t == 'Cationic':
+                inter = Cationic()
+                patterns[t] = (inter.lig_pattern, inter.prot_pattern)
+            elif t == 'Anionic':
+                inter = Anionic()
+                patterns[t] = (inter.lig_pattern, inter.prot_pattern)
+            elif t == 'MetalDonor':
+                inter = MetalDonor()
+                patterns[t] = (inter.lig_pattern, inter.prot_pattern)
+            elif t == 'MetalAcceptor':
+                inter = MetalAcceptor()
+                patterns[t] = (inter.lig_pattern, inter.prot_pattern)
+            else:
+                patterns[t] = (None, None)
+
+        for t in interaction_types:
+            lig_pat, prot_pat = patterns[t]
+            if lig_pat is None:
+                lig_masks.append(jnp.ones((N,), dtype=bool))
+                # placeholder residues filled below
+                continue
+            lig_mask = jnp.zeros((N,), dtype=bool)
+            if rdl is not None:
+                lmatches = rdl.GetSubstructMatches(lig_pat)
+                if lmatches:
+                    idxs = [m[0] for m in lmatches]
+                    lig_mask = lig_mask.at[jnp.array(idxs)].set(True)
+            lig_masks.append(lig_mask)
+
+        # Build residue masks per residue and type
+        for rdm in rds:
+            M = int(rdm.GetNumAtoms()) if rdm is not None else 0
+            row = []
+            for t in interaction_types:
+                lig_pat, prot_pat = patterns[t]
+                if prot_pat is None or rdm is None:
+                    m = jnp.zeros((max_atoms,), dtype=bool)
+                    if M:
+                        m = m.at[:M].set(True)
+                    row.append(m)
+                    continue
+                m = jnp.zeros((max_atoms,), dtype=bool)
+                pmatches = rdm.GetSubstructMatches(prot_pat)
+                if pmatches:
+                    idxs = [mm[0] for mm in pmatches]
+                    mmask = jnp.zeros((M,), dtype=bool).at[jnp.array(idxs)].set(True)
+                    m = m.at[:M].set(mmask)
+                else:
+                    if M:
+                        # no matches → no candidates
+                        pass
+                row.append(m)
+            res_masks_rows.append(jnp.stack(row))  # (T, max_atoms)
+
+        lig_cand_mat = jnp.stack(lig_masks) if lig_masks else jnp.zeros((0, N), dtype=bool)
+        res_cand_mat = jnp.stack(res_masks_rows) if res_masks_rows else jnp.zeros((0, T, max_atoms), dtype=bool)
+        return lig_cand_mat, res_cand_mat
+
     def _extract_aromatic_rings(self, mol) -> list[list[int]]:
-        """Return a list of aromatic rings as atom index lists."""
+        """Return a cached list of aromatic ring atom indices for ``mol``.
+
+        Raises a ValueError if conversion to RDKit Mol fails, when called
+        from a ring-enabled computation path.
+        """
         rdmol = self._to_rdmol(mol)
         if rdmol is None:
-            return []
+            raise ValueError("Aromatic ring interactions requested but RDKit molecule conversion failed.")
+        key = id(rdmol)
+        cached = self._ring_cache.get(key)
+        if cached is not None:
+            return cached
         ring_info = rdmol.GetRingInfo()
         rings = ring_info.AtomRings()
         aromatic = []
         for ring in rings:
             if len(ring) >= 3 and all(rdmol.GetAtomWithIdx(i).GetIsAromatic() for i in ring):
                 aromatic.append(list(ring))
+        self._ring_cache[key] = aromatic
         return aromatic
 
     def _pad_ring_indices(self, rings: list[list[int]], s_max: int) -> tuple[jnp.ndarray, jnp.ndarray]:
@@ -249,6 +347,10 @@ class JAXAccelerator:
                 rr_mask_list.append(msk)
             res_ring_idx = jnp.stack(rr_idx_list)
             res_ring_mask = jnp.stack(rr_mask_list)
+        lig_cand_mat = None
+        res_cand_mat = None
+        if self.prefilter_smarts:
+            lig_cand_mat, res_cand_mat = self._smarts_prefilter_masks(ligand, residues, self.interaction_types, layout['max_atoms'])
         batch = prepare_batch(
             ligand_coords,
             ligand_elements,
@@ -260,6 +362,9 @@ class JAXAccelerator:
             lig_ring_mask=lig_ring_mask,
             res_ring_idx=res_ring_idx,
             res_ring_mask=res_ring_mask,
+            gate_angles_by_distance=self.gate_angles_by_distance,
+            lig_cand_mat=lig_cand_mat,
+            res_cand_mat=res_cand_mat,
         )
 
         results = run_all_interactions(batch)

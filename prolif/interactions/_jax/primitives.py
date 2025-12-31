@@ -8,6 +8,7 @@ are designed to work with batched inputs and can be JIT-compiled.
 
 import jax
 import jax.numpy as jnp
+from jax.ops import segment_sum
 
 
 def pairwise_distances(coords1: jnp.ndarray, coords2: jnp.ndarray) -> jnp.ndarray:
@@ -46,10 +47,8 @@ def batch_centroids(
     )
 
     points = coords[flat_indices]
-    sums = jax.ops.segment_sum(points, segment_ids, num_segments=K)
-    counts = jax.ops.segment_sum(
-        jnp.ones(len(flat_indices)), segment_ids, num_segments=K
-    )
+    sums = segment_sum(points, segment_ids, num_segments=K)
+    counts = segment_sum(jnp.ones(len(flat_indices)), segment_ids, num_segments=K)
 
     return sums / counts[:, None]
 
@@ -82,7 +81,7 @@ def batch_ring_normals_masked(
     index_padded: jnp.ndarray,
     mask: jnp.ndarray,
 ) -> jnp.ndarray:
-    """Compute unit normals for rings using masked PCA.
+    """Compute unit normals for rings using masked Newell's method.
 
     Args:
         coords: (N, 3) array of all atom coordinates.
@@ -92,18 +91,23 @@ def batch_ring_normals_masked(
     Returns:
         (K, 3) array of unit normal vectors.
     """
-    gathered = coords[index_padded]
-    weights = mask[..., None]
-    sums = jnp.sum(gathered * weights, axis=1)
-    counts = jnp.sum(mask, axis=1, keepdims=True)
-    centroids = sums / counts
-    centered = gathered - centroids[:, None, :]
-    weighted = centered * weights
-    xx = jnp.einsum('kni,knj->kij', weighted, centered) / counts[..., None]
-    evals, evecs = jnp.linalg.eigh(xx)
-    normals = evecs[..., 0]
+    pts = coords[index_padded]
+    m = mask
+    
+    pts_next = jnp.roll(pts, shift=-1, axis=1)
+    m_next = jnp.roll(m, shift=-1, axis=1)
+    edge_mask = (m & m_next)[..., None]
+
+    x1, y1, z1 = pts[..., 0], pts[..., 1], pts[..., 2]
+    x2, y2, z2 = pts_next[..., 0], pts_next[..., 1], pts_next[..., 2]
+
+    nx = jnp.sum(edge_mask[..., 0] * (y1 - y2) * (z1 + z2), axis=1)
+    ny = jnp.sum(edge_mask[..., 0] * (z1 - z2) * (x1 + x2), axis=1)
+    nz = jnp.sum(edge_mask[..., 0] * (x1 - x2) * (y1 + y2), axis=1)
+
+    normals = jnp.stack([nx, ny, nz], axis=1)
     norms = jnp.linalg.norm(normals, axis=1, keepdims=True)
-    normals = normals / norms
+    normals = jnp.where(norms > 0, normals / norms, jnp.array([0.0, 0.0, 1.0])[None, :])
     return normals
 
 

@@ -6,6 +6,7 @@ HBDonor: ligand donor-hydrogen + residue acceptor (inverted)
 """
 
 import jax.numpy as jnp
+from jax import lax
 
 from .primitives import angle_at_vertex, pairwise_distances
 
@@ -17,6 +18,8 @@ def hbacceptor_contacts(
     distance_cutoff: float = 3.5,
     dha_angle_min: float = 130.0,
     dha_angle_max: float = 180.0,
+    precomputed_distances: jnp.ndarray | None = None,
+    gate_by_distance: bool = False,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Detect HBAcceptor interactions (ligand acceptor + residue donor).
 
@@ -32,21 +35,48 @@ def hbacceptor_contacts(
         dha_angle_min: Minimum D-H-A angle in degrees (default 130°).
         dha_angle_max: Maximum D-H-A angle in degrees (default 180°).
 
+    Args:
+        acceptor_coords: (N, 3) acceptor positions (ligand).
+        donor_coords: (M, 3) donor positions (residue).
+        hydrogen_coords: (M, 3) hydrogen positions bonded to each donor.
+        distance_cutoff: Maximum acceptor–donor distance (Å).
+        dha_angle_min: Minimum D–H–A angle (degrees).
+        dha_angle_max: Maximum D–H–A angle (degrees).
+        precomputed_distances: Optional (N, M) matrix of acceptor–donor distances
+            to reuse when already computed upstream.
+
     Returns:
         contact_mask: (N, M) boolean array, True where H-bond exists.
         distances: (N, M) acceptor-donor distances.
         angles: (N, M) D-H-A angles in degrees.
     """
-    distances = pairwise_distances(acceptor_coords, donor_coords)
-    angles_rad = angle_at_vertex(
-        donor_coords[None, :, :],
-        hydrogen_coords[None, :, :],
-        acceptor_coords[:, None, :],
+    distances = (
+        precomputed_distances
+        if precomputed_distances is not None
+        else pairwise_distances(acceptor_coords, donor_coords)
     )
-    angles_deg = jnp.degrees(angles_rad)
     distance_ok = distances <= distance_cutoff
-    angle_ok = (angles_deg >= dha_angle_min) & (angles_deg <= dha_angle_max)
-    contact_mask = distance_ok & angle_ok
+
+    def _compute_angles(_):
+        angles_rad = angle_at_vertex(
+            donor_coords[None, :, :],
+            hydrogen_coords[None, :, :],
+            acceptor_coords[:, None, :],
+        )
+        angles_deg = jnp.degrees(angles_rad)
+        angle_ok = (angles_deg >= dha_angle_min) & (angles_deg <= dha_angle_max)
+        mask = distance_ok & angle_ok
+        return mask, distances, angles_deg
+
+    def _skip_angles(_):
+        zeros = jnp.zeros_like(distances)
+        return jnp.zeros_like(distance_ok, dtype=bool), distances, zeros
+
+    contact_mask, distances, angles_deg = (
+        lax.cond(jnp.any(distance_ok) & gate_by_distance, _compute_angles, _skip_angles, operand=None)
+        if gate_by_distance
+        else _compute_angles(None)
+    )
 
     return contact_mask, distances, angles_deg
 
@@ -58,6 +88,8 @@ def hbdonor_contacts(
     distance_cutoff: float = 3.5,
     dha_angle_min: float = 130.0,
     dha_angle_max: float = 180.0,
+    precomputed_distances: jnp.ndarray | None = None,
+    gate_by_distance: bool = False,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Detect HBDonor interactions (ligand donor + residue acceptor).
 
@@ -71,20 +103,47 @@ def hbdonor_contacts(
         dha_angle_min: Minimum D-H-A angle in degrees (default 130°).
         dha_angle_max: Maximum D-H-A angle in degrees (default 180°).
 
+    Args:
+        donor_coords: (N, 3) donor positions (ligand).
+        hydrogen_coords: (N, 3) hydrogen positions bonded to each donor.
+        acceptor_coords: (M, 3) acceptor positions (residue).
+        distance_cutoff: Maximum donor–acceptor distance (Å).
+        dha_angle_min: Minimum D–H–A angle (degrees).
+        dha_angle_max: Maximum D–H–A angle (degrees).
+        precomputed_distances: Optional (N, M) matrix of donor–acceptor distances
+            to reuse when already computed upstream.
+
     Returns:
         contact_mask: (N, M) boolean array, True where H-bond exists.
         distances: (N, M) donor-acceptor distances.
         angles: (N, M) D-H-A angles in degrees.
     """
-    distances = pairwise_distances(donor_coords, acceptor_coords)
-    angles_rad = angle_at_vertex(
-        donor_coords[:, None, :],
-        hydrogen_coords[:, None, :],
-        acceptor_coords[None, :, :],
+    distances = (
+        precomputed_distances
+        if precomputed_distances is not None
+        else pairwise_distances(donor_coords, acceptor_coords)
     )
-    angles_deg = jnp.degrees(angles_rad)
     distance_ok = distances <= distance_cutoff
-    angle_ok = (angles_deg >= dha_angle_min) & (angles_deg <= dha_angle_max)
-    contact_mask = distance_ok & angle_ok
+
+    def _compute_angles(_):
+        angles_rad = angle_at_vertex(
+            donor_coords[:, None, :],
+            hydrogen_coords[:, None, :],
+            acceptor_coords[None, :, :],
+        )
+        angles_deg = jnp.degrees(angles_rad)
+        angle_ok = (angles_deg >= dha_angle_min) & (angles_deg <= dha_angle_max)
+        mask = distance_ok & angle_ok
+        return mask, distances, angles_deg
+
+    def _skip_angles(_):
+        zeros = jnp.zeros_like(distances)
+        return jnp.zeros_like(distance_ok, dtype=bool), distances, zeros
+
+    contact_mask, distances, angles_deg = (
+        lax.cond(jnp.any(distance_ok) & gate_by_distance, _compute_angles, _skip_angles, operand=None)
+        if gate_by_distance
+        else _compute_angles(None)
+    )
 
     return contact_mask, distances, angles_deg
