@@ -111,6 +111,43 @@ class JAXAccelerator:
         res_sizes = tuple(int(c.shape[0]) for c in residue_coords_list)
         return (lig_n, res_sizes)
 
+    def _to_rdmol(self, mol):
+        """Return an RDKit Mol from supported molecule wrappers."""
+        if hasattr(mol, 'GetRingInfo') and hasattr(mol, 'GetAtomWithIdx'):
+            return mol
+        if hasattr(mol, 'rdmol'):
+            return mol.rdmol
+        if hasattr(mol, 'to_rdkit'):
+            return mol.to_rdkit()
+        if hasattr(mol, 'ToRDKit'):
+            return mol.ToRDKit()
+        return None
+
+    def _extract_aromatic_rings(self, mol) -> list[list[int]]:
+        """Return a list of aromatic rings as atom index lists."""
+        rdmol = self._to_rdmol(mol)
+        if rdmol is None:
+            return []
+        ring_info = rdmol.GetRingInfo()
+        rings = ring_info.AtomRings()
+        aromatic = []
+        for ring in rings:
+            if len(ring) >= 3 and all(rdmol.GetAtomWithIdx(i).GetIsAromatic() for i in ring):
+                aromatic.append(list(ring))
+        return aromatic
+
+    def _pad_ring_indices(self, rings: list[list[int]], s_max: int) -> tuple[jnp.ndarray, jnp.ndarray]:
+        """Pad ring index lists to fixed size with a mask."""
+        k = max(1, len(rings))
+        idx = jnp.zeros((k, s_max), dtype=int)
+        mask = jnp.zeros((k, s_max), dtype=bool)
+        for r_i, ring in enumerate(rings):
+            L = min(len(ring), s_max)
+            if L:
+                idx = idx.at[r_i, :L].set(jnp.array(ring[:L], dtype=int))
+                mask = mask.at[r_i, :L].set(True)
+        return idx, mask
+
     def _get_or_build_layout(self, ligand_coords, residue_coords_list) -> dict:
         """Return a cached layout dictionary or build a new one.
 
@@ -178,6 +215,40 @@ class JAXAccelerator:
             residue_elements_list.append(elements)
 
         layout = self._get_or_build_layout(ligand_coords, residue_coords_list)
+
+        ring_types = {'CationPi', 'PiCation', 'FaceToFace', 'EdgeToFace', 'PiStacking'}
+        need_rings = any(t in ring_types for t in self.interaction_types)
+
+        lig_ring_idx = None
+        lig_ring_mask = None
+        res_ring_idx = None
+        res_ring_mask = None
+
+        if need_rings:
+            lig_rings = self._extract_aromatic_rings(ligand)
+            res_rings_all = [self._extract_aromatic_rings(res) for res in residues]
+            s_max = 0
+            k_max = 1
+            for rl in [lig_rings] + res_rings_all:
+                if rl:
+                    s_max = max(s_max, max(len(r) for r in rl))
+                    k_max = max(k_max, len(rl))
+            s_max = max(s_max, 3)
+            lig_idx, lig_mask = self._pad_ring_indices(lig_rings, s_max)
+            lig_ring_idx = lig_idx
+            lig_ring_mask = lig_mask
+            rr_idx_list = []
+            rr_mask_list = []
+            for rl in res_rings_all:
+                idx, msk = self._pad_ring_indices(rl, s_max)
+                if idx.shape[0] < k_max:
+                    pad_k = k_max - idx.shape[0]
+                    idx = jnp.concatenate([idx, jnp.zeros((pad_k, s_max), dtype=int)], axis=0)
+                    msk = jnp.concatenate([msk, jnp.zeros((pad_k, s_max), dtype=bool)], axis=0)
+                rr_idx_list.append(idx)
+                rr_mask_list.append(msk)
+            res_ring_idx = jnp.stack(rr_idx_list)
+            res_ring_mask = jnp.stack(rr_mask_list)
         batch = prepare_batch(
             ligand_coords,
             ligand_elements,
@@ -185,6 +256,10 @@ class JAXAccelerator:
             residue_elements_list,
             self.interaction_types,
             layout=layout,
+            lig_ring_idx=lig_ring_idx,
+            lig_ring_mask=lig_ring_mask,
+            res_ring_idx=res_ring_idx,
+            res_ring_mask=res_ring_mask,
         )
 
         results = run_all_interactions(batch)

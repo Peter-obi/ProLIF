@@ -273,7 +273,16 @@ def benchmark_jax_gpu(lig_mol, residues, n_runs: int = 100) -> Optional[Benchmar
     )
 
 
-def benchmark_scaling(lig_mol, residues, backend: str = 'cpu') -> list[BenchmarkResult]:
+def _tile_residues(residues, n: int):
+    """Return a list of length n by repeating residues as needed."""
+    if n <= len(residues):
+        return residues[:n]
+    reps = (n + len(residues) - 1) // len(residues)
+    tiled = (residues * reps)[:n]
+    return tiled
+
+
+def benchmark_scaling(lig_mol, residues, backend: str = 'cpu', counts: list[int] | None = None) -> list[BenchmarkResult]:
     """Benchmark scaling with different numbers of residues."""
     import jax
 
@@ -291,13 +300,10 @@ def benchmark_scaling(lig_mol, residues, backend: str = 'cpu') -> list[Benchmark
     accel = JAXAccelerator(interactions=['Hydrophobic'])
 
     results = []
-    n_residue_counts = [1, 5, 10, 20, len(residues)]
+    n_residue_counts = counts or [1, 5, 10, 20, len(residues)]
 
     for n in n_residue_counts:
-        if n > len(residues):
-            continue
-
-        subset = residues[:n]
+        subset = _tile_residues(residues, n)
 
         # Warmup
         _ = accel.compute_interactions(lig_mol, subset)
@@ -354,6 +360,8 @@ def main():
                         help="Run only GPU benchmarks")
     parser.add_argument('--scaling', action='store_true',
                         help="Run scaling benchmarks")
+    parser.add_argument('--scaling-list', type=str, default=None,
+                        help="Comma-separated residue counts for scaling (e.g., 1,5,10,20,50,100)")
     parser.add_argument('--n-runs', type=int, default=100,
                         help="Number of runs per benchmark (default: 100)")
     args = parser.parse_args()
@@ -416,14 +424,23 @@ def main():
         print("Scaling Benchmark")
         print("=" * 80)
 
+        # Parse custom scaling counts if provided
+        counts = None
+        if args.scaling_list:
+            try:
+                counts = [int(x.strip()) for x in args.scaling_list.split(',') if x.strip()]
+            except Exception:
+                print("Invalid --scaling-list; falling back to defaults")
+                counts = None
+
         if not args.gpu_only:
             print("\nCPU Scaling:")
-            scaling_results = benchmark_scaling(lig_mol, residues, 'cpu')
+            scaling_results = benchmark_scaling(lig_mol, residues, 'cpu', counts)
             print_results(scaling_results)
 
         if not args.cpu_only:
             print("\nGPU Scaling:")
-            scaling_results = benchmark_scaling(lig_mol, residues, 'gpu')
+            scaling_results = benchmark_scaling(lig_mol, residues, 'gpu', counts)
             print_results(scaling_results)
 
 

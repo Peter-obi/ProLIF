@@ -22,6 +22,10 @@ def _compute_single(
     res_coords: jnp.ndarray,
     mask: jnp.ndarray,
     interaction_types: tuple[str, ...],
+    lig_ring_idx: jnp.ndarray | None,
+    lig_ring_mask: jnp.ndarray | None,
+    res_ring_idx: jnp.ndarray | None,
+    res_ring_mask: jnp.ndarray | None,
 ):
     """Compute interactions for a single residue against the ligand.
 
@@ -159,18 +163,13 @@ def _compute_single(
             'xar_angles': xar_angles,
         }
 
-    if 'CationPi' in types:
+    if 'CationPi' in types and res_ring_idx is not None and res_ring_mask is not None:
         from .cationpi import cationpi_contacts_masked
-        S = 6
-        idx = jnp.arange(S)
-        ring_mask = idx < res_coords.shape[0]
-        idx_padded = jnp.broadcast_to(idx, (1, S))
-        ring_mask = jnp.broadcast_to(ring_mask, (1, S))
         contact_mask, dists, angles = cationpi_contacts_masked(
             ligand_coords,
             res_coords,
-            idx_padded,
-            ring_mask,
+            res_ring_idx,
+            res_ring_mask,
         )
         results['CationPi'] = {
             'mask': contact_mask,
@@ -178,17 +177,12 @@ def _compute_single(
             'angles': angles,
         }
 
-    if 'PiCation' in types:
+    if 'PiCation' in types and lig_ring_idx is not None and lig_ring_mask is not None:
         from .cationpi import pication_contacts_masked
-        S = 6
-        idx = jnp.arange(S)
-        ring_mask = idx < ligand_coords.shape[0]
-        idx_padded = jnp.broadcast_to(idx, (1, S))
-        ring_mask = jnp.broadcast_to(ring_mask, (1, S))
         contact_mask, dists, angles = pication_contacts_masked(
             ligand_coords,
-            idx_padded,
-            ring_mask,
+            lig_ring_idx,
+            lig_ring_mask,
             res_coords,
         )
         results['PiCation'] = {
@@ -197,23 +191,15 @@ def _compute_single(
             'angles': angles,
         }
 
-    if 'FaceToFace' in types:
+    if 'FaceToFace' in types and lig_ring_idx is not None and res_ring_idx is not None:
         from .pistacking import facetoface_contacts_masked
-        S = 6
-        idx = jnp.arange(S)
-        lig_mask = idx < ligand_coords.shape[0]
-        res_mask = idx < res_coords.shape[0]
-        lig_idx = jnp.broadcast_to(idx, (1, S))
-        res_idx = jnp.broadcast_to(idx, (1, S))
-        lig_mask = jnp.broadcast_to(lig_mask, (1, S))
-        res_mask = jnp.broadcast_to(res_mask, (1, S))
         contact_mask, dists, plane_angles, ncc_angles = facetoface_contacts_masked(
             ligand_coords,
-            lig_idx,
-            lig_mask,
+            lig_ring_idx,
+            lig_ring_mask,
             res_coords,
-            res_idx,
-            res_mask,
+            res_ring_idx,
+            res_ring_mask,
         )
         results['FaceToFace'] = {
             'mask': contact_mask,
@@ -222,23 +208,15 @@ def _compute_single(
             'ncc_angles': ncc_angles,
         }
 
-    if 'EdgeToFace' in types:
+    if 'EdgeToFace' in types and lig_ring_idx is not None and res_ring_idx is not None:
         from .pistacking import edgetoface_contacts_masked
-        S = 6
-        idx = jnp.arange(S)
-        lig_mask = idx < ligand_coords.shape[0]
-        res_mask = idx < res_coords.shape[0]
-        lig_idx = jnp.broadcast_to(idx, (1, S))
-        res_idx = jnp.broadcast_to(idx, (1, S))
-        lig_mask = jnp.broadcast_to(lig_mask, (1, S))
-        res_mask = jnp.broadcast_to(res_mask, (1, S))
         contact_mask, dists, plane_angles, ncc_angles = edgetoface_contacts_masked(
             ligand_coords,
-            lig_idx,
-            lig_mask,
+            lig_ring_idx,
+            lig_ring_mask,
             res_coords,
-            res_idx,
-            res_mask,
+            res_ring_idx,
+            res_ring_mask,
         )
         results['EdgeToFace'] = {
             'mask': contact_mask,
@@ -247,23 +225,15 @@ def _compute_single(
             'ncc_angles': ncc_angles,
         }
 
-    if 'PiStacking' in types:
+    if 'PiStacking' in types and lig_ring_idx is not None and res_ring_idx is not None:
         from .pistacking import pistacking_contacts_masked
-        S = 6
-        idx = jnp.arange(S)
-        lig_mask = idx < ligand_coords.shape[0]
-        res_mask = idx < res_coords.shape[0]
-        lig_idx = jnp.broadcast_to(idx, (1, S))
-        res_idx = jnp.broadcast_to(idx, (1, S))
-        lig_mask = jnp.broadcast_to(lig_mask, (1, S))
-        res_mask = jnp.broadcast_to(res_mask, (1, S))
         contact_mask, dists, plane_angles, ncc_angles, stacking_type = pistacking_contacts_masked(
             ligand_coords,
-            lig_idx,
-            lig_mask,
+            lig_ring_idx,
+            lig_ring_mask,
             res_coords,
-            res_idx,
-            res_mask,
+            res_ring_idx,
+            res_ring_mask,
         )
         results['PiStacking'] = {
             'mask': contact_mask,
@@ -281,13 +251,31 @@ def _batched_interactions(
     residue_coords: jnp.ndarray,
     valid_mask: jnp.ndarray,
     interaction_types: tuple[str, ...],
+    lig_ring_idx_all: jnp.ndarray | None,
+    lig_ring_mask_all: jnp.ndarray | None,
+    res_ring_idx_all: jnp.ndarray | None,
+    res_ring_mask_all: jnp.ndarray | None,
 ):
     """Vectorized interaction computation across residues."""
     fn = jax.vmap(
-        lambda rc, m: _compute_single(ligand_coords, rc, m, interaction_types),
-        in_axes=(0, 0),
+        lambda rc, m, ri, rm: _compute_single(
+            ligand_coords,
+            rc,
+            m,
+            interaction_types,
+            lig_ring_idx_all,
+            lig_ring_mask_all,
+            ri,
+            rm,
+        ),
+        in_axes=(0, 0, 0, 0),
     )
-    return fn(residue_coords, valid_mask)
+    return fn(
+        residue_coords,
+        valid_mask,
+        res_ring_idx_all if res_ring_idx_all is not None else jnp.array([[]]),
+        res_ring_mask_all if res_ring_mask_all is not None else jnp.array([[]]),
+    )
 
 
 def _compute_single_distance_only(
@@ -356,6 +344,10 @@ def prepare_batch(
     residue_elements_list: list[list[str]],
     interaction_types: list[str],
     layout: dict | None = None,
+    lig_ring_idx: jnp.ndarray | None = None,
+    lig_ring_mask: jnp.ndarray | None = None,
+    res_ring_idx: jnp.ndarray | None = None,
+    res_ring_mask: jnp.ndarray | None = None,
 ) -> dict:
     """Prepare batched arrays for JAX computation.
 
@@ -415,7 +407,11 @@ def prepare_batch(
         'valid_mask': valid_mask,
         'original_sizes': original_sizes,
         'interaction_types': interaction_types,
-        }
+        'lig_ring_idx': lig_ring_idx,
+        'lig_ring_mask': lig_ring_mask,
+        'res_ring_idx': res_ring_idx,
+        'res_ring_mask': res_ring_mask,
+    }
 
 
 def run_all_interactions(batch: dict) -> dict:
@@ -432,6 +428,10 @@ def run_all_interactions(batch: dict) -> dict:
     residue_coords = batch['residue_coords']
     valid_mask = batch['valid_mask']
     interaction_types = batch['interaction_types']
+    lig_ring_idx = batch.get('lig_ring_idx')
+    lig_ring_mask = batch.get('lig_ring_mask')
+    res_ring_idx = batch.get('res_ring_idx')
+    res_ring_mask = batch.get('res_ring_mask')
 
     interaction_types_tuple = tuple(interaction_types)
 
@@ -448,6 +448,10 @@ def run_all_interactions(batch: dict) -> dict:
             residue_coords,
             valid_mask,
             interaction_types_tuple,
+            lig_ring_idx,
+            lig_ring_mask,
+            res_ring_idx,
+            res_ring_mask,
         )
     return results
 
