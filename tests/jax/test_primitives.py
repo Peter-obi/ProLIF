@@ -42,17 +42,17 @@ class TestPairwiseDistances:
         result = pairwise_distances(coords1, coords2)
 
         assert result.shape == (2, 2)
-        assert_allclose(result[0, 0], 0.0, atol=1e-6)  # origin to origin
-        assert_allclose(result[0, 1], 1.0, atol=1e-6)  # origin to (0,1,0)
-        assert_allclose(result[1, 0], 1.0, atol=1e-6)  # (1,0,0) to origin
-        assert_allclose(result[1, 1], jnp.sqrt(2), atol=1e-6)  # sqrt(2)
+        assert_allclose(result[0, 0], 0.0, atol=1e-6)
+        assert_allclose(result[0, 1], 1.0, atol=1e-6)
+        assert_allclose(result[1, 0], 1.0, atol=1e-6)
+        assert_allclose(result[1, 1], jnp.sqrt(2), atol=1e-6)
 
     def test_different_shapes(self):
         """Test with different N and M."""
-        coords1 = jnp.array([[0.0, 0.0, 0.0]])  # (1, 3)
+        coords1 = jnp.array([[0.0, 0.0, 0.0]])
         coords2 = jnp.array(
             [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
-        )  # (3, 3)
+        )
         result = pairwise_distances(coords1, coords2)
         assert result.shape == (1, 3)
         assert_allclose(result[0], [1.0, 1.0, 1.0], atol=1e-6)
@@ -73,9 +73,7 @@ class TestBatchCentroids:
         result = batch_centroids(coords, indices)
 
         assert result.shape == (2, 3)
-        # Triangle 1: (0,0,0), (2,0,0), (1,1,0) -> centroid (1, 1/3, 0)
         assert_allclose(result[0], [1.0, 1 / 3, 0.0], atol=1e-6)
-        # Triangle 2: (10,10,10), (12,10,10), (11,11,10) -> centroid (11, 31/3, 10)
         assert_allclose(result[1], [11.0, 31 / 3, 10.0], atol=1e-6)
 
 
@@ -86,7 +84,6 @@ class TestRingNormal:
         result = ring_normal(xy_plane_ring, indices)
 
         assert result.shape == (3,)
-        # Normal should be +Z or -Z (unit vector)
         assert_allclose(jnp.abs(result), [0.0, 0.0, 1.0], atol=1e-6)
 
     def test_xz_plane_ring(self):
@@ -116,11 +113,9 @@ class TestBatchRingNormals:
         """Test normals for two rings in different planes."""
         coords = jnp.array(
             [
-                # Ring 1 in XY plane (indices 0, 1, 2)
                 [1.0, 0.0, 0.0],
                 [0.0, 1.0, 0.0],
                 [-1.0, 0.0, 0.0],
-                # Ring 2 in XZ plane (indices 3, 4, 5)
                 [1.0, 0.0, 0.0],
                 [0.0, 0.0, 1.0],
                 [-1.0, 0.0, 0.0],
@@ -130,9 +125,7 @@ class TestBatchRingNormals:
         result = batch_ring_normals(coords, ring_indices)
 
         assert result.shape == (2, 3)
-        # Ring 1: normal along Z
         assert_allclose(jnp.abs(result[0]), [0.0, 0.0, 1.0], atol=1e-6)
-        # Ring 2: normal along Y
         assert_allclose(jnp.abs(result[1]), [0.0, 1.0, 0.0], atol=1e-6)
 
 
@@ -147,7 +140,7 @@ class TestAngleBetweenVectors:
     def test_parallel_vectors(self):
         """0 degrees between parallel vectors."""
         v1 = jnp.array([1.0, 0.0, 0.0])
-        v2 = jnp.array([2.0, 0.0, 0.0])  # same direction, different length
+        v2 = jnp.array([2.0, 0.0, 0.0])
         result = angle_between_vectors(v1, v2)
         assert_allclose(result, 0.0, atol=1e-6)
 
@@ -172,8 +165,8 @@ class TestAngleBetweenVectors:
         result = angle_between_vectors(v1, v2)
 
         assert result.shape == (2,)
-        assert_allclose(result[0], jnp.pi / 2, atol=1e-6)  # 90 degrees
-        assert_allclose(result[1], 0.0, atol=1e-6)  # 0 degrees (same)
+        assert_allclose(result[0], jnp.pi / 2, atol=1e-6)
+        assert_allclose(result[1], 0.0, atol=1e-6)
 
 
 class TestAngleAtVertex:
@@ -215,9 +208,9 @@ class TestPointToPlaneDistance:
         """Test points above, below, and on XY plane."""
         points = jnp.array(
             [
-                [0.0, 0.0, 5.0],  # 5 units above
-                [0.0, 0.0, -3.0],  # 3 units below
-                [1.0, 1.0, 0.0],  # on the plane
+                [0.0, 0.0, 5.0],
+                [0.0, 0.0, -3.0],
+                [1.0, 1.0, 0.0],
             ]
         )
         plane_point = jnp.array([0.0, 0.0, 0.0])
@@ -231,11 +224,9 @@ class TestPointToPlaneDistance:
         """Test with a tilted plane (normal at 45 degrees)."""
         points = jnp.array([[1.0, 0.0, 1.0]])
         plane_point = jnp.array([0.0, 0.0, 0.0])
-        # Normal at 45 degrees in XZ plane
         plane_normal = jnp.array([1.0, 0.0, 1.0]) / jnp.sqrt(2)
 
         result = point_to_plane_distance(points, plane_point, plane_normal)
-        # Point (1,0,1) projected onto normal (1,0,1)/sqrt(2): dot = 2/sqrt(2) = sqrt(2)
         assert_allclose(result[0], jnp.sqrt(2), atol=1e-6)
 
     def test_single_point(self):
@@ -255,7 +246,7 @@ class TestEdgeCases:
         coords1 = jnp.array([[0.0, 0.0, 0.0]])
         coords2 = jnp.array([[1e-10, 0.0, 0.0]])
         result = pairwise_distances(coords1, coords2)
-        assert result[0, 0] >= 0  # Should not be negative
+        assert result[0, 0] >= 0
         assert jnp.isfinite(result[0, 0])
 
     def test_angle_near_zero(self):

@@ -4,7 +4,6 @@ Pytest configuration for JAX tests.
 
 import pytest
 
-# Skip all tests in this directory if JAX is not available
 try:
     import jax
     import jax.numpy as jnp
@@ -22,10 +21,10 @@ def simple_coords():
     """Simple test coordinates: origin and unit vectors."""
     return jnp.array(
         [
-            [0.0, 0.0, 0.0],  # origin
-            [1.0, 0.0, 0.0],  # x-axis
-            [0.0, 1.0, 0.0],  # y-axis
-            [0.0, 0.0, 1.0],  # z-axis
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
         ]
     )
 
@@ -48,11 +47,9 @@ def two_triangles():
     """Two triangles for testing batch operations."""
     coords = jnp.array(
         [
-            # Triangle 1 (indices 0, 1, 2)
             [0.0, 0.0, 0.0],
             [2.0, 0.0, 0.0],
             [1.0, 1.0, 0.0],
-            # Triangle 2 (indices 3, 4, 5)
             [10.0, 10.0, 10.0],
             [12.0, 10.0, 10.0],
             [11.0, 11.0, 10.0],

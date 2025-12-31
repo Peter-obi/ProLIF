@@ -12,7 +12,7 @@ Usage:
     if JAX_AVAILABLE:
         from prolif.interactions._jax.accelerator import JAXAccelerator
 
-        accel = JAXAccelerator(interactions=['hydrophobic', 'ionic'])
+        accel = JAXAccelerator(interactions=['Hydrophobic', 'Cationic'])
         results = accel.compute_interactions(ligand, protein_residues)
 """
 
@@ -35,15 +35,22 @@ class JAXAccelerator:
         distance_cutoffs: Dict mapping interaction names to distance cutoffs.
     """
 
-    # Default distance cutoffs matching ProLIF defaults
     DEFAULT_CUTOFFS = {
-        'hydrophobic': 4.5,
-        'ionic': 4.5,
-        'vdw': 4.0,
-        'hbond': 3.5,
-        'xbond': 3.5,
-        'cation_pi': 4.5,
-        'pi_stacking': 5.5,
+        'Hydrophobic': 4.5,
+        'Cationic': 4.5,
+        'Anionic': 4.5,
+        'VdWContact': 4.0,
+        'HBAcceptor': 3.5,
+        'HBDonor': 3.5,
+        'XBAcceptor': 3.5,
+        'XBDonor': 3.5,
+        'CationPi': 4.5,
+        'PiCation': 4.5,
+        'FaceToFace': 5.5,
+        'EdgeToFace': 6.5,
+        'PiStacking': 6.5,
+        'MetalDonor': 2.8,
+        'MetalAcceptor': 2.8,
     }
 
     def __init__(
@@ -55,7 +62,7 @@ class JAXAccelerator:
 
         Args:
             interactions: List of interaction types to compute.
-                Defaults to ['hydrophobic', 'ionic'].
+                Defaults to ['Hydrophobic', 'Cationic'].
             distance_cutoffs: Optional dict overriding default cutoffs.
         """
         if not JAX_AVAILABLE:
@@ -63,10 +70,11 @@ class JAXAccelerator:
                 "JAX is not available. Install with: pip install jax jaxlib"
             )
 
-        self.interaction_types = interactions or ['hydrophobic', 'ionic']
+        self.interaction_types = interactions or ['Hydrophobic', 'Cationic']
         self.distance_cutoffs = {**self.DEFAULT_CUTOFFS}
         if distance_cutoffs:
             self.distance_cutoffs.update(distance_cutoffs)
+        self._layout_cache: dict[tuple, dict] = {}
 
     def extract_coords(self, mol) -> tuple[jnp.ndarray, list[str]]:
         """Extract coordinates and elements from an RDKit molecule.
@@ -77,11 +85,9 @@ class JAXAccelerator:
         Returns:
             Tuple of (coords array (N, 3), element symbols list).
         """
-        # Handle ProLIF Residue/Molecule (has .xyz property)
         if hasattr(mol, 'xyz'):
             coords = jnp.array(mol.xyz)
         else:
-            # Fall back to RDKit conformer
             conf = mol.GetConformer()
             coords = jnp.array([
                 [conf.GetAtomPosition(i).x,
@@ -95,11 +101,53 @@ class JAXAccelerator:
 
         return coords, elements
 
+    def _layout_key(self, ligand_coords, residue_coords_list) -> tuple:
+        """Compute a cache key based on atom counts for ligand and residues.
+
+        The key encodes only sizes. Coordinates or elements changes will
+        invalidate the cache when sizes differ.
+        """
+        lig_n = int(ligand_coords.shape[0])
+        res_sizes = tuple(int(c.shape[0]) for c in residue_coords_list)
+        return (lig_n, res_sizes)
+
+    def _get_or_build_layout(self, ligand_coords, residue_coords_list) -> dict:
+        """Return a cached layout dictionary or build a new one.
+
+        The layout contains the padded mask, the original sizes, and the
+        maximum number of atoms across residues. It is reused when atom
+        counts do not change.
+        """
+        key = self._layout_key(ligand_coords, residue_coords_list)
+        layout = self._layout_cache.get(key)
+        if layout is not None:
+            return layout
+
+        max_atoms = max(coords.shape[0] for coords in residue_coords_list)
+        masks = []
+        for coords in residue_coords_list:
+            M = coords.shape[0]
+            real_mask = jnp.ones(M, dtype=bool)
+            pad_mask = jnp.zeros(max_atoms - M, dtype=bool)
+            mask = jnp.concatenate([real_mask, pad_mask])
+            masks.append(mask)
+
+        valid_mask = jnp.stack(masks)
+        original_sizes = [coords.shape[0] for coords in residue_coords_list]
+        layout = {
+            'max_atoms': max_atoms,
+            'valid_mask': valid_mask,
+            'original_sizes': original_sizes,
+        }
+        self._layout_cache[key] = layout
+        return layout
+
     def compute_interactions(
         self,
         ligand,
         residues: list,
-    ) -> list[dict]:
+        return_mode: str = 'full',
+    ) -> list[dict] | list[dict[str, bool]]:
         """Compute interactions between ligand and multiple residues.
 
         This is the main entry point for JAX-accelerated computation.
@@ -108,15 +156,20 @@ class JAXAccelerator:
             ligand: RDKit molecule or ProLIF Residue for the ligand.
             residues: List of RDKit molecules or ProLIF Residues for
                 protein residues to check.
+            return_mode: Either ``'full'`` for detailed arrays per
+                interaction, or ``'summary'`` for per-residue booleans
+                indicating presence of each interaction.
 
         Returns:
-            List of result dicts, one per residue. Each dict maps
-            interaction names to their results (mask, distances).
+            If ``return_mode='full'``, a list of result dicts, one per
+            residue. Each dict maps interaction names to their detailed
+            results (mask, distances, angles).
+
+            If ``return_mode='summary'``, a list of dictionaries with
+            per-residue booleans keyed by interaction name.
         """
-        # Extract ligand coordinates
         ligand_coords, ligand_elements = self.extract_coords(ligand)
 
-        # Extract residue coordinates
         residue_coords_list = []
         residue_elements_list = []
         for res in residues:
@@ -124,21 +177,33 @@ class JAXAccelerator:
             residue_coords_list.append(coords)
             residue_elements_list.append(elements)
 
-        # Prepare batched arrays
+        layout = self._get_or_build_layout(ligand_coords, residue_coords_list)
         batch = prepare_batch(
             ligand_coords,
             ligand_elements,
             residue_coords_list,
             residue_elements_list,
             self.interaction_types,
+            layout=layout,
         )
 
-        # Run JAX-accelerated computation
         results = run_all_interactions(batch)
 
-        # Unbatch results
-        unbatched = unbatch_results(results, batch)
+        if return_mode == 'summary':
+            from .dispatch import summarize_batched_results
+            summary = summarize_batched_results(results)
 
+            original_sizes = batch['original_sizes']
+            R = len(original_sizes)
+            per_residue = []
+            for r in range(R):
+                item = {}
+                for name, arr in summary.items():
+                    item[name] = bool(arr[r])
+                per_residue.append(item)
+            return per_residue
+
+        unbatched = unbatch_results(results, batch)
         return unbatched
 
     def compute_single(
@@ -232,11 +297,11 @@ def compute_ionic_fast(
     Returns:
         Tuple of (contact_mask (N, M), distances (N, M)) as numpy arrays.
     """
-    from .ionic import ionic_contacts
+    from .cationic import cationic_contacts
 
     cat = jnp.array(cation_coords)
     ani = jnp.array(anion_coords)
 
-    mask, dists = ionic_contacts(cat, ani, distance_cutoff)
+    mask, dists = cationic_contacts(cat, ani, distance_cutoff)
 
     return np.array(mask), np.array(dists)

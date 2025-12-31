@@ -48,6 +48,71 @@ class BenchmarkResult:
         )
 
 
+def validate_jax_vs_prolif(lig_mol, residues):
+    """Compare JAX results against ProLIF to verify correctness.
+
+    Returns dict with validation results for each interaction type.
+    """
+    from prolif.interactions import (
+        Hydrophobic, Cationic, Anionic, HBAcceptor, HBDonor,
+        XBAcceptor, XBDonor, CationPi, PiCation, FaceToFace,
+        EdgeToFace, PiStacking, MetalDonor, MetalAcceptor, VdWContact,
+    )
+    from prolif.interactions._jax.integration import has_interaction_batch
+
+    print("\nValidating JAX (with SMARTS) vs ProLIF results...")
+
+    # All ProLIF interaction types
+    prolif_interactions = {
+        'Hydrophobic': Hydrophobic(),
+        'Cationic': Cationic(),
+        'Anionic': Anionic(),
+        'HBAcceptor': HBAcceptor(),
+        'HBDonor': HBDonor(),
+        'XBAcceptor': XBAcceptor(),
+        'XBDonor': XBDonor(),
+        'CationPi': CationPi(),
+        'PiCation': PiCation(),
+        'FaceToFace': FaceToFace(),
+        'EdgeToFace': EdgeToFace(),
+        'PiStacking': PiStacking(),
+        'MetalDonor': MetalDonor(),
+        'MetalAcceptor': MetalAcceptor(),
+        'VdWContact': VdWContact(),
+    }
+
+    validation = {}
+
+    for itype, prolif_fn in prolif_interactions.items():
+        # ProLIF results (one at a time)
+        prolif_results = []
+        for res in residues:
+            result = prolif_fn.any(lig_mol, res)
+            prolif_results.append(result is not None)
+
+        # JAX batch results (using proper SMARTS integration)
+        jax_results = has_interaction_batch(prolif_fn, lig_mol, residues)
+
+        prolif_count = sum(prolif_results)
+        jax_count = sum(jax_results)
+        matches = sum(p == j for p, j in zip(prolif_results, jax_results))
+        mismatches = len(residues) - matches
+
+        validation[itype] = {
+            'prolif_count': prolif_count,
+            'jax_count': jax_count,
+            'matches': matches,
+            'mismatches': mismatches,
+            'match_rate': matches / len(residues) * 100,
+        }
+
+        status = "✓" if mismatches == 0 else "✗"
+        print(f"  {itype:15s}: ProLIF={prolif_count:2d}, JAX={jax_count:2d}, "
+              f"Match={matches}/{len(residues)} ({validation[itype]['match_rate']:.1f}%) {status}")
+
+    return validation
+
+
 def load_test_system():
     """Load ProLIF's test protein-ligand system."""
     import MDAnalysis as mda
@@ -77,26 +142,42 @@ def load_test_system():
 
 
 def benchmark_prolif_original(lig_mol, residues, n_runs: int = 100) -> BenchmarkResult:
-    """Benchmark original ProLIF implementation."""
-    from prolif.interactions import Hydrophobic
+    """Benchmark original ProLIF implementation with 9 interactions."""
+    from prolif.interactions import (
+        Hydrophobic, Cationic, Anionic, VdWContact, HBDonor, HBAcceptor,
+        XBDonor, CationPi, PiStacking,
+    )
 
-    interaction = Hydrophobic()
+    # All interaction types matching JAX implementation
+    interactions = [
+        Hydrophobic(),
+        Cationic(),      # ionic (positive)
+        Anionic(),       # ionic (negative)
+        VdWContact(),
+        HBDonor(),
+        HBAcceptor(),
+        XBDonor(),
+        CationPi(),
+        PiStacking(),
+    ]
 
     # Warmup
     for res in residues[:3]:
-        _ = interaction(lig_mol, res)
+        for interaction in interactions:
+            _ = interaction(lig_mol, res)
 
     # Timed runs
     times = []
     for _ in range(n_runs):
         start = time.perf_counter()
         for res in residues:
-            _ = interaction(lig_mol, res)
+            for interaction in interactions:
+                _ = interaction(lig_mol, res)
         times.append((time.perf_counter() - start) * 1000)  # Convert to ms
 
     times = np.array(times)
     return BenchmarkResult(
-        name="ProLIF Original (RDKit)",
+        name="ProLIF Original (9 types)",
         n_residues=len(residues),
         n_runs=n_runs,
         mean_time_ms=times.mean(),
@@ -113,7 +194,11 @@ def benchmark_jax_cpu(lig_mol, residues, n_runs: int = 100) -> BenchmarkResult:
 
     from prolif.interactions._jax import JAXAccelerator
 
-    accel = JAXAccelerator(interactions=['hydrophobic'])
+    # Align to the same 9 interactions as ProLIF baseline
+    accel = JAXAccelerator(interactions=[
+        'Hydrophobic', 'Cationic', 'Anionic', 'VdWContact',
+        'HBDonor', 'HBAcceptor', 'XBDonor', 'CationPi', 'PiStacking',
+    ])
 
     # Warmup (includes JIT compilation)
     _ = accel.compute_interactions(lig_mol, residues)
@@ -156,7 +241,11 @@ def benchmark_jax_gpu(lig_mol, residues, n_runs: int = 100) -> Optional[Benchmar
 
     from prolif.interactions._jax import JAXAccelerator
 
-    accel = JAXAccelerator(interactions=['hydrophobic'])
+    # Align to the same 9 interactions as ProLIF baseline
+    accel = JAXAccelerator(interactions=[
+        'Hydrophobic', 'Cationic', 'Anionic', 'VdWContact',
+        'HBDonor', 'HBAcceptor', 'XBDonor', 'CationPi', 'PiStacking',
+    ])
 
     # Warmup (includes JIT compilation and GPU transfer)
     _ = accel.compute_interactions(lig_mol, residues)
@@ -199,7 +288,7 @@ def benchmark_scaling(lig_mol, residues, backend: str = 'cpu') -> list[Benchmark
 
     from prolif.interactions._jax import JAXAccelerator
 
-    accel = JAXAccelerator(interactions=['hydrophobic'])
+    accel = JAXAccelerator(interactions=['Hydrophobic'])
 
     results = []
     n_residue_counts = [1, 5, 10, 20, len(residues)]
@@ -285,6 +374,9 @@ def main():
     # Load test system
     print("Loading test system...")
     lig_mol, residues, prot_mol = load_test_system()
+
+    # Validate JAX vs ProLIF results
+    validate_jax_vs_prolif(lig_mol, residues)
     print()
 
     results = []
