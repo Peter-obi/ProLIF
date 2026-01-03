@@ -81,7 +81,8 @@ def hbacceptor_frames(
 
     dvec = acc[:, :, None, :] - donors[:, None, :, :]
     dists = jnp.linalg.norm(dvec, axis=-1)
-    dist_ok = dists <= distance_cutoff
+    dc = jnp.nextafter(jnp.asarray(distance_cutoff, dists.dtype), jnp.inf)
+    dist_ok = dists <= dc
 
     ang = angle_at_vertex(
         donors[:, None, :, :],
@@ -89,8 +90,10 @@ def hbacceptor_frames(
         acc[:, :, None, :],
     )
     ang_deg = jnp.degrees(ang)
-    ang_ok = (ang_deg >= dha_angle_min) & (ang_deg <= dha_angle_max)
-
+    min_deg = jnp.nextafter(jnp.asarray(dha_angle_min, ang_deg.dtype), -jnp.inf)
+    max_deg = jnp.nextafter(jnp.asarray(dha_angle_max, ang_deg.dtype), jnp.inf)
+    ang_ok = (ang_deg >= min_deg) & (ang_deg <= max_deg)
+    
     mask = dist_ok & ang_ok
     return mask, dists, ang_deg
 
@@ -108,7 +111,9 @@ def hbdonor_frames(
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Frame-batched hydrogen bond (donor) geometry (inverted).
 
-    Returns (mask, distances, angles) with shapes (F, Nd, Ka).
+    The distance is measured between donor and acceptor heavy atoms to mirror
+    SingleAngle semantics after role inversion. The angle remains D–H–A in
+    degrees. Returns (mask, distances, angles) with shapes (F, Nd, Ka).
     """
     donors = lig_coords_f[:, d_idx, :]
     hydrogens = lig_coords_f[:, h_idx, :]
@@ -116,15 +121,14 @@ def hbdonor_frames(
 
     dvec = donors[:, :, None, :] - acc[:, None, :, :]
     dists = jnp.linalg.norm(dvec, axis=-1)
-    dist_ok = dists <= distance_cutoff
+    dc = jnp.nextafter(jnp.asarray(distance_cutoff, dists.dtype), jnp.inf)
+    dist_ok = dists <= dc
 
-    ang = angle_at_vertex(
-        donors[:, :, None, :],
-        hydrogens[:, :, None, :],
-        acc[:, None, :, :],
-    )
+    ang = angle_at_vertex(donors[:, :, None, :], hydrogens[:, :, None, :], acc[:, None, :, :])
     ang_deg = jnp.degrees(ang)
-    ang_ok = (ang_deg >= dha_angle_min) & (ang_deg <= dha_angle_max)
+    min_deg = jnp.nextafter(jnp.asarray(dha_angle_min, ang_deg.dtype), -jnp.inf)
+    max_deg = jnp.nextafter(jnp.asarray(dha_angle_max, ang_deg.dtype), jnp.inf)
+    ang_ok = (ang_deg >= min_deg) & (ang_deg <= max_deg)
     mask = dist_ok & ang_ok
     return mask, dists, ang_deg
 
@@ -386,14 +390,13 @@ def build_actor_masks(lig_mol, residues):
     return lig_masks, res_masks
 
 
-def build_angle_indices(lig_mol, residues):
-    """Precompute indices for hydrogen and halogen bond geometry.
+def _build_angle_indices_rdkit(lig_mol, residues):
+    """Precompute angle indices using RDKit molecules (internal helper).
 
-    Returns a mapping with indices for both acceptor and donor orientations
-    of hydrogen and halogen bonds. For HB donor orientation, donors and
-    hydrogens are on the ligand and acceptors on the residue; for acceptor
-    orientation, acceptors are on the ligand and donor–hydrogen pairs on the
-    residue. The same convention applies for XB with donors and halogens.
+    This variant derives indices from ProLIF RDKit molecules. It is intended
+    for single-frame RDKit workflows. For real trajectories, prefer
+    ``build_angle_indices`` which derives indices from AtomGroups to align with
+    coordinate order.
     """
     import jax.numpy as jnp
     from prolif.interactions import HBAcceptor, HBDonor, XBAcceptor, XBDonor
@@ -440,7 +443,7 @@ def build_angle_indices(lig_mol, residues):
         xb_x_rows.append(x)
         xb_d_rows.append(d)
 
-    lmatches = lig_mol.GetSubstructMatches(hb_don.lig_pattern)
+    lmatches = lig_mol.GetSubstructMatches(hb_don.prot_pattern)
     hb_lig_pairs = []
     for m in (lmatches or []):
         if len(m) >= 2:
@@ -450,7 +453,7 @@ def build_angle_indices(lig_mol, residues):
 
     hb_res_acc_rows = []
     for res in residues:
-        pmatches = res.GetSubstructMatches(hb_don.prot_pattern)
+        pmatches = res.GetSubstructMatches(hb_don.lig_pattern)
         acc = jnp.array([m[0] for m in (pmatches or [])], dtype=int) if pmatches else jnp.zeros((0,), dtype=int)
         hb_res_acc_rows.append(acc)
 
@@ -464,7 +467,7 @@ def build_angle_indices(lig_mol, residues):
 
     xbdon_res_a_rows, xbdon_res_r_rows = [], []
     for res in residues:
-        pmatches = res.GetSubstructMatches(xb_don.prot_pattern)
+        pmatches = res.GetSubstructMatches(xb_don.lig_pattern)
         a = jnp.array([m[0] for m in (pmatches or [])], dtype=int) if pmatches else jnp.zeros((0,), dtype=int)
         r = jnp.array([m[1] for m in (pmatches or [])], dtype=int) if pmatches else jnp.zeros((0,), dtype=int)
         xbdon_res_a_rows.append(a)
@@ -492,6 +495,88 @@ def build_angle_indices(lig_mol, residues):
             'lig_d_idx': xbdon_lig_d_idx,
             'res_a_idx': xbdon_res_a_rows,
             'res_r_idx': xbdon_res_r_rows,
+        },
+    }
+
+
+def build_angle_indices(lig_ag, residue_ags):
+    """Build angle indices from AtomGroups for real-frame alignment.
+
+    Derives RDKit molecules directly from the provided MDAnalysis AtomGroups
+    so that returned indices use the same atom ordering as the coordinate
+    arrays built from those groups.
+
+    Returns a dict with the same structure as the RDKit-based variant for the
+    hydrogen-bond orientation pairs. Halogen-bond entries are returned as empty
+    arrays for API completeness.
+    """
+    import jax.numpy as jnp
+    import prolif
+    from prolif.interactions import HBAcceptor, HBDonor
+
+    lig_mol = prolif.Molecule.from_mda(lig_ag)
+    res_mols = [prolif.Molecule.from_mda(ag) for ag in residue_ags]
+
+    hb_acc = HBAcceptor()
+    hb_don = HBDonor()
+
+    # HB acceptor orientation: ligand acceptors; residue donor–hydrogen pairs
+    hb_acc_idx = []
+    lmatches = lig_mol.GetSubstructMatches(hb_acc.lig_pattern)
+    if lmatches:
+        hb_acc_idx = [m[0] for m in lmatches]
+    hb_acc_idx = jnp.array(hb_acc_idx, dtype=int) if hb_acc_idx else jnp.zeros((0,), dtype=int)
+
+    hb_d_rows, hb_h_rows = [], []
+    for r in res_mols:
+        pmatches = r.GetSubstructMatches(hb_acc.prot_pattern)
+        pairs = []
+        for m in (pmatches or []):
+            if len(m) >= 2:
+                pairs.append((m[0], m[1]))
+        d = jnp.array([p[0] for p in pairs], dtype=int) if pairs else jnp.zeros((0,), dtype=int)
+        h = jnp.array([p[1] for p in pairs], dtype=int) if pairs else jnp.zeros((0,), dtype=int)
+        hb_d_rows.append(d)
+        hb_h_rows.append(h)
+
+    # HB donor orientation: ligand donor–hydrogen pairs; residue acceptors
+    lmatches = lig_mol.GetSubstructMatches(hb_don.prot_pattern)
+    hb_lig_pairs = []
+    for m in (lmatches or []):
+        if len(m) >= 2:
+            hb_lig_pairs.append((m[0], m[1]))
+    hb_lig_d_idx = jnp.array([p[0] for p in hb_lig_pairs], dtype=int) if hb_lig_pairs else jnp.zeros((0,), dtype=int)
+    hb_lig_h_idx = jnp.array([p[1] for p in hb_lig_pairs], dtype=int) if hb_lig_pairs else jnp.zeros((0,), dtype=int)
+
+    hb_res_acc_rows = []
+    for r in res_mols:
+        pmatches = r.GetSubstructMatches(hb_don.lig_pattern)
+        acc = jnp.array([m[0] for m in (pmatches or [])], dtype=int) if pmatches else jnp.zeros((0,), dtype=int)
+        hb_res_acc_rows.append(acc)
+
+    # Return HB entries and empty XB placeholders
+    return {
+        'hb': {
+            'acc_idx': hb_acc_idx,
+            'res_d_idx': hb_d_rows,
+            'res_h_idx': hb_h_rows,
+        },
+        'hb_donor': {
+            'lig_d_idx': hb_lig_d_idx,
+            'lig_h_idx': hb_lig_h_idx,
+            'res_a_idx': hb_res_acc_rows,
+        },
+        'xbacc': {
+            'lig_a_idx': jnp.zeros((0,), dtype=int),
+            'lig_r_idx': jnp.zeros((0,), dtype=int),
+            'res_x_idx': [jnp.zeros((0,), dtype=int) for _ in res_mols],
+            'res_d_idx': [jnp.zeros((0,), dtype=int) for _ in res_mols],
+        },
+        'xbdon': {
+            'lig_x_idx': jnp.zeros((0,), dtype=int),
+            'lig_d_idx': jnp.zeros((0,), dtype=int),
+            'res_a_idx': [jnp.zeros((0,), dtype=int) for _ in res_mols],
+            'res_r_idx': [jnp.zeros((0,), dtype=int) for _ in res_mols],
         },
     }
 

@@ -173,209 +173,6 @@ def build_trajectory_frames(u, lig_ag, residue_ags, max_frames: int | None = Non
     return lig_f, res_f, res_valid_mask
 
 
-def build_actor_masks(lig_mol, residues):
-    """Compute boolean masks for distance-only actor atoms.
-
-    Returns ligand and residue masks for Hydrophobic, Cationic, Anionic,
-    MetalDonor, and MetalAcceptor patterns using SMARTS on ProLIF molecules.
-    Masks for residues are padded to a common length.
-    """
-    import jax.numpy as jnp
-    from prolif.interactions import Hydrophobic, MetalDonor, MetalAcceptor, Cationic, Anionic
-
-    inters = {
-        'Hydrophobic': Hydrophobic(),
-        'Cationic': Cationic(),
-        'Anionic': Anionic(),
-        'MetalDonor': MetalDonor(),
-        'MetalAcceptor': MetalAcceptor(),
-    }
-
-    N = lig_mol.GetNumAtoms()
-    R = len(residues)
-    max_m = max(r.GetNumAtoms() for r in residues) if residues else 0
-
-    lig_masks = {}
-    res_masks = {}
-    for name, inter in inters.items():
-        lm = jnp.zeros((N,), dtype=bool)
-        lmatches = lig_mol.GetSubstructMatches(inter.lig_pattern)
-        if lmatches:
-            idxs = [m[0] for m in lmatches]
-            lm = lm.at[jnp.array(idxs)].set(True)
-        lig_masks[name] = lm
-
-        r_rows = []
-        for r in residues:
-            m = jnp.zeros((max_m,), dtype=bool)
-            pmatches = r.GetSubstructMatches(inter.prot_pattern)
-            if pmatches:
-                idxs = [mm[0] for mm in pmatches]
-                mm = jnp.zeros((r.GetNumAtoms(),), dtype=bool)
-                mm = mm.at[jnp.array(idxs)].set(True)
-                m = m.at[:r.GetNumAtoms()].set(mm)
-            r_rows.append(m)
-        res_masks[name] = jnp.stack(r_rows, axis=0) if r_rows else jnp.zeros((0, 0), dtype=bool)
-
-    return lig_masks, res_masks
-
-
-def build_angle_indices(lig_mol, residues):
-    """Precompute indices for hydrogen and halogen bond geometry.
-
-    Returns a mapping with indices for both acceptor and donor orientations
-    of hydrogen and halogen bonds. For HB donor orientation, donors and
-    hydrogens are on the ligand and acceptors on the residue; for acceptor
-    orientation, acceptors are on the ligand and donor–hydrogen pairs on the
-    residue. The same convention applies for XB with donors and halogens.
-    """
-    import jax.numpy as jnp
-    from prolif.interactions import HBAcceptor, HBDonor, XBAcceptor, XBDonor
-
-    hb_acc = HBAcceptor()
-    hb_don = HBDonor()
-    xb_acc = XBAcceptor()
-    xb_don = XBDonor()
-
-    hb_acc_idx = []
-    lmatches = lig_mol.GetSubstructMatches(hb_acc.lig_pattern)
-    if lmatches:
-        hb_acc_idx = [m[0] for m in lmatches]
-    hb_acc_idx = jnp.array(hb_acc_idx, dtype=int) if hb_acc_idx else jnp.zeros((0,), dtype=int)
-
-    hb_d_rows, hb_h_rows = [], []
-    for r in residues:
-        pmatches = r.GetSubstructMatches(hb_acc.prot_pattern)
-        pairs = []
-        for m in (pmatches or []):
-            if len(m) >= 2:
-                pairs.append((m[0], m[1]))
-        d = jnp.array([p[0] for p in pairs], dtype=int) if pairs else jnp.zeros((0,), dtype=int)
-        h = jnp.array([p[1] for p in pairs], dtype=int) if pairs else jnp.zeros((0,), dtype=int)
-        hb_d_rows.append(d)
-        hb_h_rows.append(h)
-
-    xb_a_rows, xb_r_rows = [], []
-    lmatches = lig_mol.GetSubstructMatches(xb_acc.lig_pattern)
-    a = [m[0] for m in lmatches] if lmatches else []
-    r = [m[1] for m in lmatches] if lmatches else []
-    xbacc_a_idx = jnp.array(a, dtype=int) if a else jnp.zeros((0,), dtype=int)
-    xbacc_r_idx = jnp.array(r, dtype=int) if r else jnp.zeros((0,), dtype=int)
-
-    xb_x_rows, xb_d_rows = [], []
-    for res in residues:
-        pmatches = res.GetSubstructMatches(xb_acc.prot_pattern)
-        pairs = []
-        for m in (pmatches or []):
-            if len(m) >= 2:
-                pairs.append((m[1], m[0]))
-        x = jnp.array([p[0] for p in pairs], dtype=int) if pairs else jnp.zeros((0,), dtype=int)
-        d = jnp.array([p[1] for p in pairs], dtype=int) if pairs else jnp.zeros((0,), dtype=int)
-        xb_x_rows.append(x)
-        xb_d_rows.append(d)
-
-    hb_lig_d_rows, hb_lig_h_rows = [], []
-    lmatches = lig_mol.GetSubstructMatches(hb_don.lig_pattern)
-    hb_lig_pairs = []
-    for m in (lmatches or []):
-        if len(m) >= 2:
-            hb_lig_pairs.append((m[0], m[1]))
-    hb_lig_d_idx = jnp.array([p[0] for p in hb_lig_pairs], dtype=int) if hb_lig_pairs else jnp.zeros((0,), dtype=int)
-    hb_lig_h_idx = jnp.array([p[1] for p in hb_lig_pairs], dtype=int) if hb_lig_pairs else jnp.zeros((0,), dtype=int)
-
-    hb_res_acc_rows = []
-    for res in residues:
-        pmatches = res.GetSubstructMatches(hb_don.prot_pattern)
-        acc = jnp.array([m[0] for m in pmatches], dtype=int) if pmatches else jnp.zeros((0,), dtype=int)
-        hb_res_acc_rows.append(acc)
-
-    xbdon_lig_x_rows, xbdon_lig_d_rows = [], []
-    lmatches = lig_mol.GetSubstructMatches(xb_don.lig_pattern)
-    xbdon_pairs = []
-    for m in (lmatches or []):
-        if len(m) >= 2:
-            xbdon_pairs.append((m[1], m[0]))
-    xbdon_lig_x_idx = jnp.array([p[0] for p in xbdon_pairs], dtype=int) if xbdon_pairs else jnp.zeros((0,), dtype=int)
-    xbdon_lig_d_idx = jnp.array([p[1] for p in xbdon_pairs], dtype=int) if xbdon_pairs else jnp.zeros((0,), dtype=int)
-
-    xbdon_res_a_rows, xbdon_res_r_rows = [], []
-    for res in residues:
-        pmatches = res.GetSubstructMatches(xb_don.prot_pattern)
-        a = jnp.array([m[0] for m in pmatches], dtype=int) if pmatches else jnp.zeros((0,), dtype=int)
-        r = jnp.array([m[1] for m in pmatches], dtype=int) if pmatches else jnp.zeros((0,), dtype=int)
-        xbdon_res_a_rows.append(a)
-        xbdon_res_r_rows.append(r)
-
-    return {
-        'hb': {
-            'acc_idx': hb_acc_idx,
-            'res_d_idx': hb_d_rows,
-            'res_h_idx': hb_h_rows,
-        },
-        'hb_donor': {
-            'lig_d_idx': hb_lig_d_idx,
-            'lig_h_idx': hb_lig_h_idx,
-            'res_a_idx': hb_res_acc_rows,
-        },
-        'xbacc': {
-            'lig_a_idx': xbacc_a_idx,
-            'lig_r_idx': xbacc_r_idx,
-            'res_x_idx': xb_x_rows,
-            'res_d_idx': xb_d_rows,
-        },
-        'xbdon': {
-            'lig_x_idx': xbdon_lig_x_idx,
-            'lig_d_idx': xbdon_lig_d_idx,
-            'res_a_idx': xbdon_res_a_rows,
-            'res_r_idx': xbdon_res_r_rows,
-        },
-    }
-
-
-def build_ring_cation_indices(lig_mol, residues):
-    """Precompute ring and cation indices for ring-based interactions.
-
-    Uses ProLIF patterns to find aromatic rings and cations on the ligand and
-    per residue; returns lists of ring index arrays and arrays of cation indices.
-    """
-    import jax.numpy as jnp
-    from prolif.interactions import PiStacking, CationPi, FaceToFace, EdgeToFace
-
-    pi = PiStacking()
-    ftf = FaceToFace()
-    etf = EdgeToFace()
-    ring_patterns = getattr(ftf, "pi_ring", []) or getattr(etf, "pi_ring", [])
-    lig_rings = []
-    for pat in ring_patterns:
-        for m in lig_mol.GetSubstructMatches(pat):
-            lig_rings.append(jnp.array(list(m), dtype=int))
-    res_rings = []
-    for r in residues:
-        rr = []
-        for pat in ring_patterns:
-            for m in r.GetSubstructMatches(pat):
-                rr.append(jnp.array(list(m), dtype=int))
-        res_rings.append(rr)
-
-    cp = CationPi()
-    lmatches = lig_mol.GetSubstructMatches(cp.cation)
-    lig_cations = jnp.array([m[0] for m in lmatches], dtype=int) if lmatches else jnp.zeros((0,), dtype=int)
-    res_cations = []
-    for r in residues:
-        pm = r.GetSubstructMatches(cp.cation)
-        rc = jnp.array([m[0] for m in pm], dtype=int) if pm else jnp.zeros((0,), dtype=int)
-        res_cations.append(rc)
-
-    return {
-        'lig_rings': lig_rings,
-        'res_rings': res_rings,
-        'lig_cations': lig_cations,
-        'res_cations': res_cations,
-        'pi': pi,
-        'cp': cp,
-    }
-
-
 
 def _complete_angle_indices(angle_idx: dict, residues: list) -> dict:
     """Ensure angle index mapping contains donor variants expected by JAX helpers.
@@ -429,7 +226,6 @@ def jax_benchmark(lig_f, res_f, res_valid_mask, lig_masks, res_actor_masks, angl
     # Check if GPU is actually available
     dev = get_gpu_device()
     if use_gpu and dev is None:
-        print("GPU requested (--gpu) but no GPU detected; running on CPU.")
         use_gpu = False
 
     # Timing loop
@@ -445,10 +241,8 @@ def jax_benchmark(lig_f, res_f, res_valid_mask, lig_masks, res_actor_masks, angl
     if use_gpu:
         if chunk_size is not None and chunk_size > 0:
             step = int(chunk_size)
-            print(f"Manual chunk size: {step} frames (N={N}, R={R}, M={M})")
         else:
             step = calculate_chunk_size(N, R, M)
-            print(f"Auto-calculated chunk size: {step} frames (N={N}, R={R}, M={M})")
 
     for _ in range(runs):
         t0 = time.perf_counter()
@@ -529,78 +323,6 @@ def prolif_benchmark(lig_mol, residues, frames: int, runs: int) -> BenchmarkResu
     )
 
 
-def build_vdw_radii(
-    lig_mol,
-    residues,
-    *,
-    lig_ag=None,
-    residue_ags=None,
-    use_real: bool = False,
-):
-    """Build per-atom van der Waals radii arrays aligned with coordinate order.
-
-    When ``use_real`` is True, radii are derived from the MDAnalysis AtomGroups
-    (`lig_ag`, `residue_ags`) to match the coordinate ordering in real-frame
-    mode. Otherwise, radii are derived from the RDKit molecules (`lig_mol`,
-    `residues`) to match duplicate-frame mode.
-
-    Returns ligand radii (N,), residue radii (R, M) padded to max M, and
-    ProLIF's VdW tolerance.
-    """
-    import jax.numpy as jnp
-    from prolif.interactions import VdWContact
-    from MDAnalysis.topology import guessers
-
-    def _symbol_from_atom(atom) -> str:
-        sym = None
-        try:
-            sym = atom.element
-        except Exception:
-            sym = None
-        if not sym:
-            try:
-                sym = guessers.guess_atom_element(getattr(atom, 'name', ''))
-            except Exception:
-                sym = 'C'
-        return str(sym).capitalize()
-
-    vdw = VdWContact()
-
-    if use_real:
-        assert lig_ag is not None and residue_ags is not None
-        lig_elems = [_symbol_from_atom(a) for a in lig_ag.atoms]
-        lig_radii = jnp.array([vdw.vdwradii.get(e, 1.7) for e in lig_elems], dtype=float)
-
-        R = len(residue_ags)
-        max_m = max((ag.n_atoms for ag in residue_ags), default=0)
-        res_rows = []
-        for ag in residue_ags:
-            elems = [_symbol_from_atom(a) for a in ag.atoms]
-            row = jnp.array([vdw.vdwradii.get(e, 1.7) for e in elems], dtype=float)
-            if ag.n_atoms < max_m:
-                pad = jnp.zeros((max_m - ag.n_atoms,), dtype=float)
-                row = jnp.concatenate([row, pad], axis=0)
-            res_rows.append(row)
-        res_radii = jnp.stack(res_rows, axis=0) if res_rows else jnp.zeros((0, 0), dtype=float)
-    else:
-        N = lig_mol.GetNumAtoms()
-        lig_elems = [lig_mol.GetAtomWithIdx(i).GetSymbol() for i in range(N)]
-        lig_radii = jnp.array([vdw.vdwradii.get(e, 1.7) for e in lig_elems], dtype=float)
-
-        R = len(residues)
-        max_m = max(r.GetNumAtoms() for r in residues) if residues else 0
-        res_rows = []
-        for r in residues:
-            m = r.GetNumAtoms()
-            elems = [r.GetAtomWithIdx(i).GetSymbol() for i in range(m)]
-            row = jnp.array([vdw.vdwradii.get(e, 1.7) for e in elems], dtype=float)
-            if m < max_m:
-                pad = jnp.zeros((max_m - m,), dtype=float)
-                row = jnp.concatenate([row, pad], axis=0)
-            res_rows.append(row)
-        res_radii = jnp.stack(res_rows, axis=0) if res_rows else jnp.zeros((0, 0), dtype=float)
-
-    return lig_radii, res_radii, float(vdw.tolerance)
 
 
 def jax_boolean_results(
@@ -758,6 +480,55 @@ def prolif_boolean_results(u, lig_ag, residue_ags, max_frames: int | None = None
     return out
 
 
+def prolif_boolean_results_fixed(u, lig_ag, residue_ags, max_frames: int | None = None):
+    """Compute per-interaction booleans using fixed RDKit connectivity.
+
+    Builds ligand and residue RDKit molecules once from the first frame and
+    only updates coordinates for each subsequent frame before evaluating the
+    nine interactions.
+    """
+    import numpy as np
+    import prolif
+    from rdkit.Geometry import Point3D
+    from prolif.interactions import (
+        Hydrophobic, Cationic, Anionic, VdWContact,
+        HBAcceptor, HBDonor, PiStacking, CationPi, PiCation,
+    )
+
+    inters = [
+        Hydrophobic(), Cationic(), Anionic(), VdWContact(),
+        HBAcceptor(), HBDonor(),
+        PiStacking(), CationPi(), PiCation(),
+    ]
+    names = [
+        'Hydrophobic', 'Cationic', 'Anionic', 'VdWContact',
+        'HBAcceptor', 'HBDonor', 'PiStacking', 'CationPi', 'PiCation',
+    ]
+
+    F_total = len(u.trajectory)
+    F = F_total if not max_frames or max_frames <= 0 else min(F_total, int(max_frames))
+    R = len(residue_ags)
+    out = {n: np.zeros((F, R), dtype=bool) for n in names}
+
+    lig_mol = prolif.Molecule.from_mda(lig_ag)
+    res_mols = [prolif.Molecule.from_mda(ag) for ag in residue_ags]
+
+    def _update_coords(mol, coords):
+        conf = mol.GetConformer()
+        for i in range(coords.shape[0]):
+            x, y, z = float(coords[i, 0]), float(coords[i, 1]), float(coords[i, 2])
+            conf.SetAtomPosition(i, Point3D(x, y, z))
+
+    for f_i, ts in enumerate(u.trajectory[:F]):
+        _ = ts
+        _update_coords(lig_mol, lig_ag.positions)
+        for r_i, ag in enumerate(residue_ags):
+            _update_coords(res_mols[r_i], ag.positions)
+            for inter, name in zip(inters, names):
+                out[name][f_i, r_i] = bool(inter.any(lig_mol, res_mols[r_i]))
+    return out
+
+
 
 def summarize_accuracy(jax_out, pl_out):
     """Compute simple accuracy per interaction between JAX and ProLIF outputs."""
@@ -789,6 +560,8 @@ def main():
     parser.add_argument('--ligsel', type=str, default='resname LIG', help='MDAnalysis ligand selection string')
     parser.add_argument('--protsel', type=str, default='protein', help='MDAnalysis protein selection string')
     parser.add_argument('--cutoff', type=float, default=6.0, help='Residues within cutoff of ligand (A)')
+    parser.add_argument('--debug-hb', action='store_true', help='Print details for HBDonor mismatches')
+    parser.add_argument('--fixed-connectivity', action='store_true', help='Freeze RDKit connectivity; update only coordinates per frame')
     args = parser.parse_args()
 
     u, lig_ag, prot_ag, lig_mol, residues, residue_ags = load_system_and_residues(
@@ -799,7 +572,7 @@ def main():
     F = int(lig_f.shape[0])
     lig_masks, res_actor_masks = jax_build_actor_masks(lig_mol, residues)
 
-    angle_idx = jax_build_angle_indices(lig_mol, residues)
+    angle_idx = jax_build_angle_indices(lig_ag, residue_ags)
     angle_idx = _complete_angle_indices(angle_idx, residues)
     ring_idx = jax_build_ring_cation_indices(lig_mol, residues)
     vdw_radii = jax_build_vdw_radii(lig_mol, residues, lig_ag=lig_ag, residue_ags=residue_ags, use_real=True)
@@ -814,7 +587,10 @@ def main():
     prolif_res = prolif_benchmark(lig_mol, residues, F, args.runs)
 
     jax_out = jax_has_interactions_frames(lig_f, res_f, res_valid_mask, lig_masks, res_actor_masks, angle_idx, ring_idx, vdw_radii)
-    pl_out = prolif_boolean_results(u, lig_ag, residue_ags, max_frames=F)
+    if args.fixed_connectivity:
+        pl_out = prolif_boolean_results_fixed(u, lig_ag, residue_ags, max_frames=F)
+    else:
+        pl_out = prolif_boolean_results(u, lig_ag, residue_ags, max_frames=F)
     acc = summarize_accuracy(jax_out, pl_out)
 
     print("\nFrame-batched benchmark (9 interactions; all frame-batched in JAX path):")
@@ -827,6 +603,42 @@ def main():
     if acc:
         acc_str = ", ".join([f"{k}: {v*100:.1f}%" for k, v in acc.items()])
         print(f"Accuracy (JAX vs ProLIF): {acc_str}")
+    if args.debug_hb:
+        import numpy as np
+        hb_j = np.asarray(jax_out.get('HBDonor'), dtype=bool)
+        hb_p = np.asarray(pl_out.get('HBDonor'), dtype=bool)
+        mism = np.argwhere(hb_j != hb_p)
+        print(f"HBDonor mismatches: {len(mism)}")
+        if len(mism):
+            from prolif.interactions._jax.framebatch import hbdonor_frames
+            lig_d = angle_idx['hb_donor']['lig_d_idx']
+            lig_h = angle_idx['hb_donor']['lig_h_idx']
+            from prolif.interactions import HBDonor
+            hb = HBDonor()
+            shown = 0
+            for f_i, r_i in mism:
+                acc_idx = angle_idx['hb_donor']['res_a_idx'][r_i]
+                m, d, a = hbdonor_frames(
+                    lig_f, res_f[:, r_i, :, :], lig_d, lig_h, acc_idx,
+                    distance_cutoff=float(hb.distance),
+                    dha_angle_min=float(hb.angle[0]), dha_angle_max=float(hb.angle[1]),
+                )
+                dmin = float(np.min(np.asarray(d[f_i])) if d.shape[-1] else float('inf'))
+                amax = float(np.max(np.asarray(a[f_i])) if a.shape[-1] else float('-inf'))
+                # Also check ProLIF-detected pairs for this frame/residue
+                import prolif as _pl
+                u.trajectory[int(f_i)]
+                lig_mol = _pl.Molecule.from_mda(lig_ag)
+                res_mol = _pl.Molecule.from_mda(residue_ags[int(r_i)])
+                pl_pairs = list(hb.detect(lig_mol, res_mol))
+                npairs = len(pl_pairs)
+                print(f"  Frame {int(f_i)}, Resid {int(r_i)} | JAX={hb_j[f_i,r_i]} ProLIF={hb_p[f_i,r_i]} | min d={dmin:.3f}A, max ang={amax:.2f}deg | ProLIF pairs={npairs}")
+                if npairs and shown < 10:
+                    for k, meta in enumerate(pl_pairs[:3]):
+                        print(f"    ProLIF pair {k}: distance={meta.get('distance'):.3f}A, angle={meta.get('DHA_angle'):.2f}deg | idxs={meta['indices']}")
+                shown += 1
+                if shown >= 50:
+                    break
 
 
 if __name__ == "__main__":

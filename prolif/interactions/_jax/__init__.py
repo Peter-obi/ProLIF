@@ -1,10 +1,12 @@
 """
 JAX-accelerated helpers for ProLIF.
 
-Expose only the minimal, stable API:
-- JAX availability flag
-- pairwise_distances primitive
-- simple integration helpers that use JAX for distances
+High-level API (recommended):
+- analyze_trajectory: Process full MD trajectories with automatic GPU/chunking
+- analyze_frame: Single-frame analysis matching ProLIF Molecule API
+
+Low-level primitives (for custom pipelines):
+- pairwise_distances, has_interactions_frames, etc.
 """
 
 try:
@@ -14,6 +16,10 @@ except ImportError:
     JAX_AVAILABLE = False
 
 if JAX_AVAILABLE:
+    # High-level API (recommended entry points)
+    from .api import analyze_trajectory, analyze_frame, InteractionResult
+
+    # Low-level primitives
     from .primitives import pairwise_distances
     from .integration import compute_distances_batch, has_interaction_batch
     from .framebatch import (
@@ -38,7 +44,13 @@ if JAX_AVAILABLE:
     )
 
     __all__ = [
+        # Availability flag
         "JAX_AVAILABLE",
+        # High-level API
+        "analyze_trajectory",
+        "analyze_frame",
+        "InteractionResult",
+        # Low-level primitives
         "pairwise_distances",
         "compute_distances_batch",
         "has_interaction_batch",

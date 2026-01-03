@@ -1,0 +1,33 @@
+Loading benchmarks/MDR00020797/full.pdb + benchmarks/MDR00020797/full.xtc...
+Total frames: 50001, using first 2000
+Ligand: 26 atoms, Protein: 4650 atoms
+Cutoff: 6.0 A, Runs: 3
+
+==========================================================================================
+
+[1/3] Running ProLIF API (Fingerprint.run)...
+/Users/peterobi/Documents/ideas/ProLIF/.venv/lib/python3.12/site-packages/MDAnalysis/topology/tables.py:52: DeprecationWarning: Deprecated in version 2.8.0
+MDAnalysis.topology.tables has been moved to MDAnalysis.guesser.tables. This import point will be removed in MDAnalysis version 3.0.0
+  warnings.warn(wmsg, category=DeprecationWarning)
+/Users/peterobi/Documents/ideas/ProLIF/.venv/lib/python3.12/site-packages/MDAnalysis/converters/RDKit.py:575: UserWarning: No `bonds` attribute in this AtomGroup. Guessing bonds based on atoms coordinates
+  warnings.warn(
+ProLIF API (Fingerprint.run)             |   510203.0 +/-   8274.8 ms | min:   498517.4 | R=31
+
+[2/3] Running JAX first (residue_mode='first')...
+JAX first (fixed residues)               |     4587.2 +/-    202.0 ms | min:     4383.2 | R=31
+
+[3/3] Running JAX all (residue_mode='all')...
+JAX all (pre-scan + eval)                |    11711.6 +/-    211.0 ms | min:    11429.1 | R=52
+
+==========================================================================================
+SUMMARY
+==========================================================================================
+Method                                     |          Time (ms) |    Speedup
+------------------------------------------------------------------------------------------
+ProLIF API (Fingerprint.run)               |   510203.0 +/- 8274.8 |        1.0x
+JAX first (fixed residues)                 |     4587.2 +/- 202.0 |      111.2x
+JAX all (pre-scan + eval)                  |    11711.6 +/- 211.0 |       43.6x
+------------------------------------------------------------------------------------------
+
+JAX first vs ProLIF default: 111.2x speedup
+JAX all vs ProLIF default: 43.6x speedup
